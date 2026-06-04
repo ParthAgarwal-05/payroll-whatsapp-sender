@@ -1,0 +1,23 @@
+{
+    "month_year": "month_year",
+    "establishment": "establishment",
+    "principal_employer": "principal_employer",
+    "address": "address",
+    "employee_name": "employee_name",
+    "workman_id": "workman_id",
+    "guardian_name": "guardian_name",
+    "designation": "designation",
+    "uan": "uan",
+    "bank_account": "bank_account",
+    "wage_period": "wage_period",
+    "attendance": "attendance",
+    "basic": "basic",
+    "da": "da",
+    "allowances": "allowances",
+    "gross_wages": "gross_wages",
+    "pf": "pf",
+    "esi": "esi",
+    "other_deductions": "other_deductions",
+    "net_wages": "net_wages",
+    "issue_date": "issue_date"
+}
