@@ -13,6 +13,13 @@ import json
 import os
 import platform
 import subprocess
+
+if platform.system() == "Windows":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
 import threading
 import tkinter as tk
 from datetime import datetime
@@ -43,6 +50,42 @@ SUCCESS = "#4ecca3"
 ERROR = "#e94560"
 INFO = "#a8a8b3"
 SAVE_GREEN = "#27ae60"
+
+
+def bind_mouse_scroll(widget: tk.Widget) -> None:
+    """Bind mouse wheel scrolling specifically to a widget when hovered."""
+    def _on_mousewheel(event: tk.Event) -> None:
+        try:
+            if hasattr(event, "num") and event.num == 4:
+                widget.yview_scroll(-1, "units")
+            elif hasattr(event, "num") and event.num == 5:
+                widget.yview_scroll(1, "units")
+            else:
+                delta = getattr(event, "delta", 0)
+                if delta:
+                    if platform.system() == "Darwin":
+                        widget.yview_scroll(int(-1 * delta), "units")
+                    else:
+                        widget.yview_scroll(int(-1 * (delta / 120)), "units")
+        except Exception:
+            pass
+
+    def _on_enter(event: tk.Event) -> None:
+        if platform.system() == "Linux":
+            widget.bind_all("<Button-4>", _on_mousewheel)
+            widget.bind_all("<Button-5>", _on_mousewheel)
+        else:
+            widget.bind_all("<MouseWheel>", _on_mousewheel)
+
+    def _on_leave(event: tk.Event) -> None:
+        if platform.system() == "Linux":
+            widget.unbind_all("<Button-4>")
+            widget.unbind_all("<Button-5>")
+        else:
+            widget.unbind_all("<MouseWheel>")
+
+    widget.bind("<Enter>", _on_enter)
+    widget.bind("<Leave>", _on_leave)
 
 
 def generate_month_options() -> list[str]:
@@ -103,8 +146,15 @@ class TemplateMappingDialog(tk.Toplevel):
             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         )
 
-        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.window_id = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         self.canvas.configure(yscrollcommand=scrollbar.set)
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(self.window_id, width=e.width))
+
+        bind_mouse_scroll(self.canvas)
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Control-s>", lambda e: self.save_data())
+        self.bind("<Control-S>", lambda e: self.save_data())
 
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -144,9 +194,9 @@ class TemplateMappingDialog(tk.Toplevel):
         k_var = tk.StringVar(value=key)
         v_var = tk.StringVar(value=val)
 
-        ttk.Entry(row_frame, textvariable=k_var, width=22).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Entry(row_frame, textvariable=k_var).pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
         ttk.Label(row_frame, text="➔", style="Card.TLabel").pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Entry(row_frame, textvariable=v_var, width=22).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Entry(row_frame, textvariable=v_var).pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
 
         def delete_row():
             row_frame.destroy()
@@ -375,27 +425,27 @@ class PayrollApp(tk.Tk):
         Tk Entry widgets, so they are not bound here.
         """
         # Bind Ctrl+A → Select All on ALL Entry widgets (ttk.Entry and tk.Entry)
-        self.bind_class("TEntry", "<Control-a>", self._on_select_all)
-        self.bind_class("TEntry", "<Control-A>", self._on_select_all)
-        self.bind_class("Entry", "<Control-a>", self._on_select_all)
-        self.bind_class("Entry", "<Control-A>", self._on_select_all)
+        # Using both <Control-a> and <Control-Key-a> to ensure cross-platform safety
+        for key in ("<Control-a>", "<Control-A>", "<Control-Key-a>", "<Control-Key-A>"):
+            self.bind_class("TEntry", key, self._on_select_all)
+            self.bind_class("Entry", key, self._on_select_all)
 
         # Ensure Ctrl+C/V/X work explicitly (some Linux DEs intercept these)
         for widget_class in ("TEntry", "Entry"):
-            self.bind_class(widget_class, "<Control-c>", self._on_copy)
-            self.bind_class(widget_class, "<Control-C>", self._on_copy)
-            self.bind_class(widget_class, "<Control-v>", self._on_paste)
-            self.bind_class(widget_class, "<Control-V>", self._on_paste)
-            self.bind_class(widget_class, "<Control-x>", self._on_cut)
-            self.bind_class(widget_class, "<Control-X>", self._on_cut)
+            for key_c in ("<Control-c>", "<Control-C>", "<Control-Key-c>", "<Control-Key-C>"):
+                self.bind_class(widget_class, key_c, self._on_copy)
+            for key_v in ("<Control-v>", "<Control-V>", "<Control-Key-v>", "<Control-Key-V>"):
+                self.bind_class(widget_class, key_v, self._on_paste)
+            for key_x in ("<Control-x>", "<Control-X>", "<Control-Key-x>", "<Control-Key-X>"):
+                self.bind_class(widget_class, key_x, self._on_cut)
 
         # Right-click context menu on all Entry widgets
         self.bind_class("TEntry", "<Button-3>", self._show_context_menu)
         self.bind_class("Entry", "<Button-3>", self._show_context_menu)
 
         # Also bind on the Text widget (Activity Log) for copy support
-        self.bind_class("Text", "<Control-a>", self._on_text_select_all)
-        self.bind_class("Text", "<Control-A>", self._on_text_select_all)
+        for key in ("<Control-a>", "<Control-A>", "<Control-Key-a>", "<Control-Key-A>"):
+            self.bind_class("Text", key, self._on_text_select_all)
         self.bind_class("Text", "<Button-3>", self._show_text_context_menu)
 
     @staticmethod
@@ -750,6 +800,8 @@ class PayrollApp(tk.Tk):
         )
         self._log_text.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self._log_text.yview)
+        
+        bind_mouse_scroll(self._log_text)
 
         # Colour tags
         self._log_text.tag_configure("success", foreground=SUCCESS)
@@ -863,11 +915,33 @@ class PayrollApp(tk.Tk):
     # ------------------------------------------------------------------ #
     def browse_file(self) -> None:
         """Open a file dialog for Excel files and populate the entry."""
-        filepath: str = filedialog.askopenfilename(
-            title="Select Payroll Excel File",
-            filetypes=[("Excel Files", "*.xlsx *.xls"), ("All Files", "*.*")],
-            initialdir=str(PROJECT_ROOT),
-        )
+        system: str = platform.system()
+        filepath: str = ""
+
+        if system == "Linux":
+            try:
+                result = subprocess.run(
+                    ["zenity", "--file-selection", "--title=Select Payroll Excel File", "--file-filter=Excel Files | *.xlsx *.xls", f"--filename={PROJECT_ROOT}/"],
+                    capture_output=True, text=True, check=True
+                )
+                filepath = result.stdout.strip()
+            except Exception:
+                try:
+                    result = subprocess.run(
+                        ["kdialog", "--getopenfilename", str(PROJECT_ROOT), "*.xlsx *.xls"],
+                        capture_output=True, text=True, check=True
+                    )
+                    filepath = result.stdout.strip()
+                except Exception:
+                    pass
+        
+        if not filepath:
+            filepath = filedialog.askopenfilename(
+                title="Select Payroll Excel File",
+                filetypes=[("Excel Files", "*.xlsx *.xls"), ("All Files", "*.*")],
+                initialdir=str(PROJECT_ROOT),
+            )
+
         if filepath:
             self._excel_var.set(filepath)
             self.log_message(f"Selected file: {filepath}", tag="info")
@@ -1167,6 +1241,9 @@ class PayrollApp(tk.Tk):
         )
         listbox.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=listbox.yview)
+
+        bind_mouse_scroll(listbox)
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
 
         for csv_file in csv_files[:50]:
             listbox.insert(tk.END, csv_file.name)
