@@ -9,6 +9,7 @@ The GUI now acts as the configuration editor — all API settings
 are editable in the UI and persisted back to the ``.env`` file.
 """
 
+import json
 import os
 import platform
 import subprocess
@@ -70,6 +71,119 @@ def generate_month_options() -> list[str]:
         abbr = calendar.month_abbr[month]
         options.append(f"{abbr}-{year}")
     return options
+
+
+class TemplateMappingDialog(tk.Toplevel):
+    """Dialog for editing the template mappings."""
+
+    def __init__(self, parent: tk.Tk) -> None:
+        super().__init__(parent)
+        self.title("Template Mapping Manager")
+        self.configure(bg=CARD_BG)
+        self.minsize(520, 500)
+        self.transient(parent)
+        self.grab_set()
+
+        self.mapping_file: Path = PROJECT_ROOT / "templates" / "template_mapping.json"
+        self.mappings: list[tuple[tk.StringVar, tk.StringVar, tk.Frame]] = []
+
+        # UI Setup
+        ttk.Label(self, text="Template Variables & Columns", font=("Segoe UI", 14, "bold"), background=CARD_BG, foreground=TEXT).pack(padx=20, pady=(20, 10), anchor=tk.W)
+
+        # Scrollable area
+        container = tk.Frame(self, bg=CARD_BG)
+        container.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+
+        self.canvas = tk.Canvas(container, bg=CARD_BG, highlightthickness=0)
+        scrollbar = tk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = tk.Frame(self.canvas, bg=CARD_BG)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.rows_frame = tk.Frame(self.scrollable_frame, bg=CARD_BG)
+        self.rows_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.load_data()
+
+        # Add Mapping button
+        ttk.Button(self.scrollable_frame, text="+ Add Mapping", style="Secondary.TButton", command=self.add_empty_row).pack(anchor=tk.W, pady=10)
+
+        # Save / Cancel
+        btn_frame = tk.Frame(self, bg=CARD_BG)
+        btn_frame.pack(fill=tk.X, padx=20, pady=(10, 20))
+
+        ttk.Button(btn_frame, text="Save", style="Save.TButton", command=self.save_data).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(btn_frame, text="Cancel", style="Secondary.TButton", command=self.destroy).pack(side=tk.LEFT)
+
+    def load_data(self) -> None:
+        try:
+            with open(self.mapping_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+
+        for k, v in data.items():
+            self.add_row(k, v)
+
+    def add_empty_row(self) -> None:
+        self.add_row("", "")
+
+    def add_row(self, key: str, val: str) -> None:
+        row_frame = tk.Frame(self.rows_frame, bg=CARD_BG)
+        row_frame.pack(fill=tk.X, pady=4)
+
+        k_var = tk.StringVar(value=key)
+        v_var = tk.StringVar(value=val)
+
+        ttk.Entry(row_frame, textvariable=k_var, width=22).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(row_frame, text="➔", style="Card.TLabel").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Entry(row_frame, textvariable=v_var, width=22).pack(side=tk.LEFT, padx=(0, 10))
+
+        def delete_row():
+            row_frame.destroy()
+            self.mappings.remove((k_var, v_var, row_frame))
+
+        ttk.Button(row_frame, text="Delete", style="Stop.TButton", command=delete_row).pack(side=tk.LEFT)
+
+        self.mappings.append((k_var, v_var, row_frame))
+
+    def save_data(self) -> None:
+        new_data = {}
+        seen_keys = set()
+
+        for k_var, v_var, _ in self.mappings:
+            k = k_var.get().strip()
+            v = v_var.get().strip()
+
+            if not k:
+                messagebox.showerror("Error", "Variable name cannot be empty.", parent=self)
+                return
+            if not v:
+                messagebox.showerror("Error", "Excel column cannot be empty.", parent=self)
+                return
+            if k in seen_keys:
+                messagebox.showerror("Error", f"Duplicate variable name found: '{k}'", parent=self)
+                return
+
+            seen_keys.add(k)
+            new_data[k] = v
+
+        try:
+            with open(self.mapping_file, "w", encoding="utf-8") as f:
+                json.dump(new_data, f, indent=4)
+            messagebox.showinfo("Success", "Template mapping saved successfully.", parent=self)
+            self.destroy()
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Could not save file:\n{e}", parent=self)
 
 
 class PayrollApp(tk.Tk):
@@ -557,6 +671,9 @@ class PayrollApp(tk.Tk):
         ttk.Button(inner, text="Browse…", style="Secondary.TButton", command=self.browse_file).grid(
             row=0, column=2, padx=(6, 0), pady=6
         )
+        ttk.Button(inner, text="⚙️ Template Mapping", style="Secondary.TButton", command=self.open_template_mapping).grid(
+            row=0, column=3, padx=(6, 0), pady=6
+        )
 
         # Row 1 — Month / Year (read-only dropdown)
         ttk.Label(inner, text="Payroll Month/Year:", style="Card.TLabel").grid(
@@ -754,6 +871,10 @@ class PayrollApp(tk.Tk):
         if filepath:
             self._excel_var.set(filepath)
             self.log_message(f"Selected file: {filepath}", tag="info")
+
+    def open_template_mapping(self) -> None:
+        """Open the Template Mapping Manager dialog."""
+        TemplateMappingDialog(self)
 
     def start_sending(self) -> None:
         """Validate inputs, save settings, create a PayslipSender and start sending."""
