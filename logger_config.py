@@ -5,8 +5,22 @@ streaming, ensuring consistent log formatting across all modules.
 """
 
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+
+def get_project_root() -> Path:
+    """Return the project root directory.
+    
+    Works for both standard Python execution and PyInstaller compiled executables.
+    When frozen, the executable is run from a temp folder, so we use sys.executable
+    to find the directory containing the actual .exe file.
+    """
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    else:
+        return Path(__file__).resolve().parent
 
 
 def setup_logger(name: str = 'PayrollWhatsApp') -> logging.Logger:
@@ -22,7 +36,7 @@ def setup_logger(name: str = 'PayrollWhatsApp') -> logging.Logger:
     Returns:
         A fully configured :class:`logging.Logger` instance.
     """
-    project_root: Path = Path(__file__).resolve().parent
+    project_root: Path = get_project_root()
     log_dir: Path = project_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 

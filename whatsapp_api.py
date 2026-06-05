@@ -16,10 +16,10 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from logger_config import setup_logger
+from logger_config import setup_logger, get_project_root
 
 # Load environment variables from .env at the project root
-_PROJECT_ROOT = Path(__file__).resolve().parent
+_PROJECT_ROOT = get_project_root()
 load_dotenv(_PROJECT_ROOT / ".env")
 
 

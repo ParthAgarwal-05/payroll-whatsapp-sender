@@ -4,6 +4,9 @@ Payroll WhatsApp Sender — Tkinter GUI Application.
 Provides a modern dark-themed interface for sending wage slips
 via WhatsApp. All network operations run in a background thread
 so the GUI stays responsive.
+
+The GUI now acts as the configuration editor — all API settings
+are editable in the UI and persisted back to the ``.env`` file.
 """
 
 import os
@@ -18,13 +21,14 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from logger_config import setup_logger
+from config_manager import read_env, update_env, validate_settings, reload_env
+from logger_config import setup_logger, get_project_root
 from send_payslips import PayslipSender
 
 # ---------------------------------------------------------------------------
 # Project paths
 # ---------------------------------------------------------------------------
-PROJECT_ROOT: Path = Path(__file__).resolve().parent
+PROJECT_ROOT: Path = get_project_root()
 
 # ---------------------------------------------------------------------------
 # Colour palette
@@ -37,6 +41,35 @@ TEXT = "#ffffff"
 SUCCESS = "#4ecca3"
 ERROR = "#e94560"
 INFO = "#a8a8b3"
+SAVE_GREEN = "#27ae60"
+
+
+def generate_month_options() -> list[str]:
+    """Generate a list of month options in ``MMM-YYYY`` format.
+
+    Produces 25 entries: the previous 12 months, the current month,
+    and the next 12 months — all in chronological order.
+
+    Uses only the Python standard library (no external dependencies).
+
+    Returns:
+        A list of strings like ``['Jun-2025', 'Jul-2025', ..., 'Jun-2027']``.
+    """
+    import calendar
+
+    today = datetime.now()
+    current_month: int = today.month
+    current_year: int = today.year
+
+    options: list[str] = []
+    for offset in range(-12, 13):
+        # Compute target month/year with wraparound
+        total_months = (current_year * 12 + current_month - 1) + offset
+        year = total_months // 12
+        month = (total_months % 12) + 1
+        abbr = calendar.month_abbr[month]
+        options.append(f"{abbr}-{year}")
+    return options
 
 
 class PayrollApp(tk.Tk):
@@ -58,7 +91,7 @@ class PayrollApp(tk.Tk):
 
         # Window basics
         self.title("Payroll WhatsApp Sender")
-        self.minsize(700, 800)
+        self.minsize(750, 920)
         self.configure(bg=BG)
         self.resizable(True, True)
 
@@ -69,17 +102,21 @@ class PayrollApp(tk.Tk):
         self._success: int = 0
         self._failed: int = 0
         self._skipped: int = 0
-        self._record_count: int = 0  # total expected records for progress bar
+        self._record_count: int = 0
 
         # Build UI
         self._configure_styles()
         self._build_header()
-        self._build_settings()
+        self._build_api_settings()
+        self._build_send_settings()
         self._build_actions()
         self._build_progress()
         self._build_log()
         self._build_summary()
         self._build_footer()
+
+        # Keyboard shortcuts & context menus
+        self._bind_shortcuts()
 
         self._logger.info("GUI initialised.")
 
@@ -151,6 +188,18 @@ class PayrollApp(tk.Tk):
             foreground=[("disabled", "#888888")],
         )
         style.configure(
+            "Save.TButton",
+            background=SAVE_GREEN,
+            foreground=TEXT,
+            font=("Segoe UI", 11, "bold"),
+            padding=(18, 8),
+        )
+        style.map(
+            "Save.TButton",
+            background=[("active", "#219a52"), ("disabled", "#555555")],
+            foreground=[("disabled", "#999999")],
+        )
+        style.configure(
             "Stop.TButton",
             background="#c0392b",
             foreground=TEXT,
@@ -163,6 +212,29 @@ class PayrollApp(tk.Tk):
             foreground=[("disabled", "#999999")],
         )
 
+        # Combobox (for Month/Year dropdown)
+        style.configure(
+            "TCombobox",
+            fieldbackground=ACCENT,
+            foreground=TEXT,
+            selectbackground=ACCENT,
+            selectforeground=TEXT,
+            arrowcolor=TEXT,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", ACCENT)],
+            foreground=[("readonly", TEXT)],
+            selectbackground=[("readonly", ACCENT)],
+            selectforeground=[("readonly", TEXT)],
+        )
+        # Style the dropdown listbox via option_add (Tk limitation)
+        self.option_add("*TCombobox*Listbox.background", CARD_BG)
+        self.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        self.option_add("*TCombobox*Listbox.selectForeground", TEXT)
+        self.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
+
         # Progressbar
         style.configure(
             "green.Horizontal.TProgressbar",
@@ -170,6 +242,199 @@ class PayrollApp(tk.Tk):
             background=SUCCESS,
             thickness=22,
         )
+
+    # ------------------------------------------------------------------ #
+    # Keyboard shortcuts & context menus
+    # ------------------------------------------------------------------ #
+    def _bind_shortcuts(self) -> None:
+        """Bind standard text-editing shortcuts to all Entry widgets.
+
+        Tk's default binding for Ctrl+A in Entry widgets is inherited from
+        Emacs — it moves the cursor to the start of the line (like Home).
+        This method overrides that binding to perform Select All instead.
+
+        Ctrl+C/V/X are already handled by Tk's built-in clipboard bindings
+        on all platforms, but we rebind them explicitly to guarantee
+        consistent behaviour on all Linux desktop environments.
+
+        Ctrl+Z (undo) and Ctrl+Y (redo) are not natively supported by
+        Tk Entry widgets, so they are not bound here.
+        """
+        # Bind Ctrl+A → Select All on ALL Entry widgets (ttk.Entry and tk.Entry)
+        self.bind_class("TEntry", "<Control-a>", self._on_select_all)
+        self.bind_class("TEntry", "<Control-A>", self._on_select_all)
+        self.bind_class("Entry", "<Control-a>", self._on_select_all)
+        self.bind_class("Entry", "<Control-A>", self._on_select_all)
+
+        # Ensure Ctrl+C/V/X work explicitly (some Linux DEs intercept these)
+        for widget_class in ("TEntry", "Entry"):
+            self.bind_class(widget_class, "<Control-c>", self._on_copy)
+            self.bind_class(widget_class, "<Control-C>", self._on_copy)
+            self.bind_class(widget_class, "<Control-v>", self._on_paste)
+            self.bind_class(widget_class, "<Control-V>", self._on_paste)
+            self.bind_class(widget_class, "<Control-x>", self._on_cut)
+            self.bind_class(widget_class, "<Control-X>", self._on_cut)
+
+        # Right-click context menu on all Entry widgets
+        self.bind_class("TEntry", "<Button-3>", self._show_context_menu)
+        self.bind_class("Entry", "<Button-3>", self._show_context_menu)
+
+        # Also bind on the Text widget (Activity Log) for copy support
+        self.bind_class("Text", "<Control-a>", self._on_text_select_all)
+        self.bind_class("Text", "<Control-A>", self._on_text_select_all)
+        self.bind_class("Text", "<Button-3>", self._show_text_context_menu)
+
+    @staticmethod
+    def _on_select_all(event: tk.Event) -> str:
+        """Handle Ctrl+A — select all text in an Entry widget."""
+        widget = event.widget
+        widget.select_range(0, tk.END)
+        widget.icursor(tk.END)
+        return "break"  # Prevent Tk's default Emacs-style Ctrl+A binding
+
+    @staticmethod
+    def _on_copy(event: tk.Event) -> str:
+        """Handle Ctrl+C — copy selected text to clipboard."""
+        widget = event.widget
+        try:
+            if widget.selection_present():
+                widget.event_generate("<<Copy>>")
+        except (tk.TclError, AttributeError):
+            pass
+        return "break"
+
+    @staticmethod
+    def _on_paste(event: tk.Event) -> str:
+        """Handle Ctrl+V — paste text from clipboard."""
+        widget = event.widget
+        try:
+            # Delete selected text first (if any), then insert clipboard
+            if widget.selection_present():
+                widget.delete(tk.SEL_FIRST, tk.SEL_LAST)
+            clipboard = widget.clipboard_get()
+            widget.insert(tk.INSERT, clipboard)
+        except (tk.TclError, AttributeError):
+            pass
+        return "break"
+
+    @staticmethod
+    def _on_cut(event: tk.Event) -> str:
+        """Handle Ctrl+X — cut selected text to clipboard."""
+        widget = event.widget
+        try:
+            if widget.selection_present():
+                widget.event_generate("<<Cut>>")
+        except (tk.TclError, AttributeError):
+            pass
+        return "break"
+
+    @staticmethod
+    def _on_text_select_all(event: tk.Event) -> str:
+        """Handle Ctrl+A — select all text in a Text widget."""
+        widget = event.widget
+        widget.tag_add(tk.SEL, "1.0", tk.END)
+        widget.mark_set(tk.INSERT, tk.END)
+        return "break"
+
+    def _show_context_menu(self, event: tk.Event) -> None:
+        """Show a right-click context menu for Entry widgets."""
+        widget = event.widget
+        menu = tk.Menu(self, tearoff=0, bg=CARD_BG, fg=TEXT,
+                       activebackground=ACCENT, activeforeground=TEXT,
+                       font=("Segoe UI", 10))
+
+        has_selection = False
+        try:
+            has_selection = widget.selection_present()
+        except (tk.TclError, AttributeError):
+            pass
+
+        has_clipboard = False
+        try:
+            widget.clipboard_get()
+            has_clipboard = True
+        except tk.TclError:
+            pass
+
+        is_readonly = False
+        try:
+            state = str(widget.cget("state"))
+            is_readonly = state in ("readonly", "disabled")
+        except tk.TclError:
+            pass
+
+        menu.add_command(
+            label="Cut",
+            accelerator="Ctrl+X",
+            command=lambda: widget.event_generate("<<Cut>>"),
+            state=tk.NORMAL if (has_selection and not is_readonly) else tk.DISABLED,
+        )
+        menu.add_command(
+            label="Copy",
+            accelerator="Ctrl+C",
+            command=lambda: widget.event_generate("<<Copy>>"),
+            state=tk.NORMAL if has_selection else tk.DISABLED,
+        )
+        menu.add_command(
+            label="Paste",
+            accelerator="Ctrl+V",
+            command=lambda: self._context_paste(widget),
+            state=tk.NORMAL if (has_clipboard and not is_readonly) else tk.DISABLED,
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="Select All",
+            accelerator="Ctrl+A",
+            command=lambda: (widget.select_range(0, tk.END), widget.icursor(tk.END)),
+        )
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _show_text_context_menu(self, event: tk.Event) -> None:
+        """Show a right-click context menu for the Text (log) widget."""
+        widget = event.widget
+        menu = tk.Menu(self, tearoff=0, bg=CARD_BG, fg=TEXT,
+                       activebackground=ACCENT, activeforeground=TEXT,
+                       font=("Segoe UI", 10))
+
+        has_selection = False
+        try:
+            widget.index(tk.SEL_FIRST)
+            has_selection = True
+        except tk.TclError:
+            pass
+
+        menu.add_command(
+            label="Copy",
+            accelerator="Ctrl+C",
+            command=lambda: widget.event_generate("<<Copy>>"),
+            state=tk.NORMAL if has_selection else tk.DISABLED,
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="Select All",
+            accelerator="Ctrl+A",
+            command=lambda: (widget.tag_add(tk.SEL, "1.0", tk.END), widget.mark_set(tk.INSERT, tk.END)),
+        )
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    @staticmethod
+    def _context_paste(widget: tk.Widget) -> None:
+        """Paste clipboard text into a widget, replacing any selection."""
+        try:
+            if hasattr(widget, "selection_present") and widget.selection_present():
+                widget.delete(tk.SEL_FIRST, tk.SEL_LAST)
+            clipboard = widget.clipboard_get()
+            widget.insert(tk.INSERT, clipboard)
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------ #
     # UI builder helpers
@@ -182,10 +447,103 @@ class PayrollApp(tk.Tk):
         ttk.Label(frame, text="Payroll WhatsApp Sender", style="Header.TLabel").pack(anchor=tk.W)
         ttk.Label(frame, text="Send wage slips via WhatsApp", style="Sub.TLabel").pack(anchor=tk.W, pady=(2, 0))
 
-    def _build_settings(self) -> None:
-        """Build the settings LabelFrame with Excel file, template and month fields."""
-        lf = ttk.LabelFrame(self, text="  Settings  ", style="TLabelframe")
-        lf.pack(fill=tk.X, padx=20, pady=10)
+    def _build_api_settings(self) -> None:
+        """Build the WhatsApp API Configuration panel.
+
+        Contains editable fields for all API credentials and template
+        settings.  Values are loaded from the ``.env`` file on startup.
+        A "Save Settings" button persists changes back to ``.env``.
+        """
+        lf = ttk.LabelFrame(self, text="  WhatsApp API Configuration  ", style="TLabelframe")
+        lf.pack(fill=tk.X, padx=20, pady=(10, 4))
+        inner = ttk.Frame(lf, style="Card.TFrame")
+        inner.pack(fill=tk.X, padx=12, pady=10)
+
+        # Read current values from .env
+        env_data: dict[str, str] = read_env()
+
+        # --- Row 0: Phone Number ID ---
+        ttk.Label(inner, text="Phone Number ID:", style="Card.TLabel").grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 8), pady=5
+        )
+        self._phone_id_var = tk.StringVar(value=env_data.get("PHONE_NUMBER_ID", ""))
+        ttk.Entry(inner, textvariable=self._phone_id_var, width=52).grid(
+            row=0, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=5
+        )
+
+        # --- Row 1: API Version ---
+        ttk.Label(inner, text="API Version:", style="Card.TLabel").grid(
+            row=1, column=0, sticky=tk.W, padx=(0, 8), pady=5
+        )
+        self._api_version_var = tk.StringVar(value=env_data.get("API_VERSION", "v25.0"))
+        ttk.Entry(inner, textvariable=self._api_version_var, width=52).grid(
+            row=1, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=5
+        )
+
+        # --- Row 2: Template Name ---
+        ttk.Label(inner, text="Template Name:", style="Card.TLabel").grid(
+            row=2, column=0, sticky=tk.W, padx=(0, 8), pady=5
+        )
+        self._template_var = tk.StringVar(value=env_data.get("TEMPLATE_NAME", ""))
+        ttk.Entry(inner, textvariable=self._template_var, width=52).grid(
+            row=2, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=5
+        )
+
+        # --- Row 3: Template Language ---
+        ttk.Label(inner, text="Template Language:", style="Card.TLabel").grid(
+            row=3, column=0, sticky=tk.W, padx=(0, 8), pady=5
+        )
+        self._template_lang_var = tk.StringVar(value=env_data.get("TEMPLATE_LANGUAGE", "en"))
+        ttk.Entry(inner, textvariable=self._template_lang_var, width=52).grid(
+            row=3, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=5
+        )
+
+        # --- Row 4: Access Token (masked) ---
+        ttk.Label(inner, text="Access Token:", style="Card.TLabel").grid(
+            row=4, column=0, sticky=tk.W, padx=(0, 8), pady=5
+        )
+        self._access_token_var = tk.StringVar(value=env_data.get("ACCESS_TOKEN", ""))
+        self._token_entry = tk.Entry(
+            inner,
+            textvariable=self._access_token_var,
+            width=52,
+            show="•",
+            bg=ACCENT,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=("Segoe UI", 10),
+        )
+        self._token_entry.grid(row=4, column=1, sticky=tk.EW, padx=4, pady=5)
+
+        # Toggle visibility button
+        self._token_visible = False
+        self._toggle_btn = ttk.Button(
+            inner, text="👁", style="Secondary.TButton", command=self._toggle_token_visibility, width=3
+        )
+        self._toggle_btn.grid(row=4, column=2, padx=(4, 0), pady=5)
+
+        # --- Row 5: Save Settings button ---
+        btn_frame = ttk.Frame(inner, style="Card.TFrame")
+        btn_frame.grid(row=5, column=0, columnspan=3, pady=(10, 2))
+
+        ttk.Button(
+            btn_frame, text="💾  Save Settings", style="Save.TButton", command=self.save_settings
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        # Status label for save feedback
+        self._save_status_var = tk.StringVar(value="")
+        self._save_status_label = ttk.Label(
+            btn_frame, textvariable=self._save_status_var, style="Card.TLabel"
+        )
+        self._save_status_label.pack(side=tk.LEFT, padx=(8, 0))
+
+        inner.columnconfigure(1, weight=1)
+
+    def _build_send_settings(self) -> None:
+        """Build the Send Settings panel with Excel file and Month/Year fields."""
+        lf = ttk.LabelFrame(self, text="  Send Settings  ", style="TLabelframe")
+        lf.pack(fill=tk.X, padx=20, pady=4)
         inner = ttk.Frame(lf, style="Card.TFrame")
         inner.pack(fill=tk.X, padx=12, pady=10)
 
@@ -200,24 +558,21 @@ class PayrollApp(tk.Tk):
             row=0, column=2, padx=(6, 0), pady=6
         )
 
-        # Row 1 — Template name
-        ttk.Label(inner, text="Template Name:", style="Card.TLabel").grid(
+        # Row 1 — Month / Year (read-only dropdown)
+        ttk.Label(inner, text="Payroll Month/Year:", style="Card.TLabel").grid(
             row=1, column=0, sticky=tk.W, padx=(0, 8), pady=6
         )
-        self._template_var = tk.StringVar(value=os.getenv("TEMPLATE_NAME", ""))
-        ttk.Entry(inner, textvariable=self._template_var, width=48).grid(
-            row=1, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=6
+        self._month_options: list[str] = generate_month_options()
+        current_month: str = datetime.now().strftime("%b-%Y")
+        self._month_var = tk.StringVar(value=current_month)
+        self._month_combo = ttk.Combobox(
+            inner,
+            textvariable=self._month_var,
+            values=self._month_options,
+            state="readonly",
+            width=46,
         )
-
-        # Row 2 — Month / Year
-        current_month_year: str = datetime.now().strftime("%B %Y")
-        ttk.Label(inner, text="Month/Year:", style="Card.TLabel").grid(
-            row=2, column=0, sticky=tk.W, padx=(0, 8), pady=6
-        )
-        self._month_var = tk.StringVar(value=current_month_year)
-        ttk.Entry(inner, textvariable=self._month_var, width=48).grid(
-            row=2, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=6
-        )
+        self._month_combo.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=6)
 
         inner.columnconfigure(1, weight=1)
 
@@ -264,7 +619,7 @@ class PayrollApp(tk.Tk):
 
         self._log_text = tk.Text(
             container,
-            height=12,
+            height=10,
             wrap=tk.WORD,
             bg="#0d1b2a",
             fg=TEXT,
@@ -327,6 +682,66 @@ class PayrollApp(tk.Tk):
         ).pack(side=tk.LEFT)
 
     # ------------------------------------------------------------------ #
+    # Settings actions
+    # ------------------------------------------------------------------ #
+    def _get_gui_settings(self) -> dict[str, str]:
+        """Collect all API settings from the GUI fields.
+
+        Returns:
+            A dict mapping .env key names to their current GUI values.
+        """
+        return {
+            "ACCESS_TOKEN": self._access_token_var.get().strip(),
+            "PHONE_NUMBER_ID": self._phone_id_var.get().strip(),
+            "TEMPLATE_NAME": self._template_var.get().strip(),
+            "TEMPLATE_LANGUAGE": self._template_lang_var.get().strip(),
+            "API_VERSION": self._api_version_var.get().strip(),
+        }
+
+    def save_settings(self) -> None:
+        """Validate and persist the current GUI settings to ``.env``.
+
+        After a successful save the environment is reloaded so that
+        subsequent operations (including ``PayslipSender`` initialisation)
+        pick up the new values automatically.
+        """
+        settings = self._get_gui_settings()
+
+        # Validate
+        is_valid, msg = validate_settings(settings)
+        if not is_valid:
+            messagebox.showerror("Validation Error", msg)
+            return
+
+        # Write to .env
+        success, msg = update_env(settings)
+        if not success:
+            messagebox.showerror("Save Error", msg)
+            self._save_status_var.set("❌ Save failed")
+            return
+
+        # Reload env vars into os.environ
+        reload_env()
+
+        # Visual feedback
+        self._save_status_var.set("✅ Settings saved")
+        self.log_message("Settings saved to .env successfully.", tag="success")
+        self._logger.info("Settings saved to .env via GUI.")
+
+        # Clear the status label after 4 seconds
+        self.after(4000, lambda: self._save_status_var.set(""))
+
+    def _toggle_token_visibility(self) -> None:
+        """Toggle the Access Token field between masked and visible."""
+        self._token_visible = not self._token_visible
+        if self._token_visible:
+            self._token_entry.configure(show="")
+            self._toggle_btn.configure(text="🙈")
+        else:
+            self._token_entry.configure(show="•")
+            self._toggle_btn.configure(text="👁")
+
+    # ------------------------------------------------------------------ #
     # Public actions
     # ------------------------------------------------------------------ #
     def browse_file(self) -> None:
@@ -341,7 +756,21 @@ class PayrollApp(tk.Tk):
             self.log_message(f"Selected file: {filepath}", tag="info")
 
     def start_sending(self) -> None:
-        """Validate inputs, create a PayslipSender and start the send process in a background thread."""
+        """Validate inputs, save settings, create a PayslipSender and start sending."""
+        # --- Save current GUI settings to .env first ---
+        settings = self._get_gui_settings()
+        is_valid, msg = validate_settings(settings)
+        if not is_valid:
+            messagebox.showerror("Missing Configuration", msg)
+            return
+
+        # Persist settings before sending
+        success, msg = update_env(settings)
+        if not success:
+            messagebox.showerror("Save Error", f"Could not save settings before sending:\n{msg}")
+            return
+        reload_env()
+
         # --- Input validation ---
         excel_path: str = self._excel_var.get().strip()
         template_name: str = self._template_var.get().strip()
@@ -353,23 +782,14 @@ class PayrollApp(tk.Tk):
         if not Path(excel_path).is_file():
             messagebox.showerror("File Not Found", f"The selected file does not exist:\n{excel_path}")
             return
-        if not template_name:
-            messagebox.showerror("Missing Template", "Please enter a WhatsApp template name.")
-            return
         if not month_year:
-            messagebox.showerror("Missing Month/Year", "Please enter the month and year.")
+            messagebox.showerror("Missing Month/Year", "Please select a payroll month from the dropdown.")
             return
-
-        # Check .env credentials (ACCESS_TOKEN and PHONE_NUMBER_ID)
-        access_token: str = os.getenv("ACCESS_TOKEN", "").strip()
-        phone_number_id: str = os.getenv("PHONE_NUMBER_ID", "").strip()
-        if not access_token or not phone_number_id:
+        if month_year not in self._month_options:
             messagebox.showerror(
-                "Missing Credentials",
-                "ACCESS_TOKEN and/or PHONE_NUMBER_ID are not set.\n\n"
-                "Please update the .env file in the project root with:\n"
-                "  ACCESS_TOKEN=<your-access-token>\n"
-                "  PHONE_NUMBER_ID=<your-phone-number-id>",
+                "Invalid Month/Year",
+                f"'{month_year}' is not a valid option.\n\n"
+                "Please select a month from the dropdown list.",
             )
             return
 
@@ -388,7 +808,7 @@ class PayrollApp(tk.Tk):
         self._start_btn.configure(state=tk.DISABLED)
         self._stop_btn.configure(state=tk.NORMAL)
 
-        self.log_message("Initialising sender…", tag="info")
+        self.log_message("Settings saved. Initialising sender…", tag="info")
 
         # --- Create sender & launch thread ---
         try:

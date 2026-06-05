@@ -59,7 +59,8 @@ class MessageDatabase:
                      ``<project_root>/database/history.db``.
         """
         if db_path is None:
-            project_root = Path(__file__).resolve().parent
+            from logger_config import get_project_root
+            project_root = get_project_root()
             db_file = project_root / "database" / "history.db"
         else:
             db_file = Path(db_path)

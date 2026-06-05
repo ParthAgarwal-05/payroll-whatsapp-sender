@@ -351,7 +351,8 @@ class PayslipSender:
         Returns:
             Absolute path to the generated CSV report file.
         """
-        project_root: Path = Path(__file__).resolve().parent
+        from logger_config import get_project_root
+        project_root: Path = get_project_root()
         reports_dir: Path = project_root / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
 
