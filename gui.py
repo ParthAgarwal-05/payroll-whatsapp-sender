@@ -176,6 +176,9 @@ class PayrollApp(tk.Tk):
         # Validate template mapping file on startup
         self._validate_template_file()
 
+        # Handle window close
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self._logger.info("GUI initialised.")
 
     # ------------------------------------------------------------------ #
@@ -1016,15 +1019,18 @@ class PayrollApp(tk.Tk):
                 self._stop_btn.configure(state=tk.DISABLED)
                 return
         except Exception as exc:
-            # If preview fails, still allow sending with basic confirmation
-            if not messagebox.askyesno(
-                'Confirm Send',
-                f'Could not generate preview ({exc}).\n\nProceed anyway?',
-                icon='warning',
-            ):
-                self._start_btn.configure(state=tk.NORMAL)
-                self._stop_btn.configure(state=tk.DISABLED)
-                return
+            # If preview fails, do NOT allow proceeding — the data
+            # or configuration is broken and sending would be unsafe.
+            messagebox.showerror(
+                'Preview Failed',
+                f'Could not generate send preview:\n\n{exc}\n\n'
+                'Please fix the issue and try again.',
+            )
+            self.log_message(f'Preview failed: {exc}', tag='error')
+            self._start_btn.configure(state=tk.NORMAL)
+            self._stop_btn.configure(state=tk.DISABLED)
+            self._logger.exception('Preview generation failed.')
+            return
 
         # --- Launch thread ---
         self._send_thread = threading.Thread(target=self._run_sender, daemon=True)
@@ -1179,6 +1185,36 @@ class PayrollApp(tk.Tk):
             f"Skipped:  {skipped}"
             f"{report_info}",
         )
+        self._sender = None
+
+    def _on_close(self) -> None:
+        """Handle WM_DELETE_WINDOW event gracefully."""
+        if getattr(self, '_shutting_down', False):
+            return
+            
+        if self._send_thread and self._send_thread.is_alive():
+            if messagebox.askokcancel(
+                "Send in Progress",
+                "A send operation is currently in progress.\n"
+                "Are you sure you want to exit? The system will wait for the current message to finish."
+            ):
+                self._shutting_down = True
+                self.log_message("Stopping sender before exit. Please wait...", tag="warning")
+                if self._start_btn.winfo_exists():
+                    self._start_btn.configure(state=tk.DISABLED)
+                if self._stop_btn.winfo_exists():
+                    self._stop_btn.configure(state=tk.DISABLED)
+                if self._sender:
+                    self._sender.stop()
+                self._wait_for_shutdown()
+        else:
+            self.destroy()
+
+    def _wait_for_shutdown(self) -> None:
+        if self._send_thread and self._send_thread.is_alive():
+            self.after(500, self._wait_for_shutdown)
+        else:
+            self.destroy()
 
     def _handle_thread_error(self, error_msg: str) -> None:
         """Handle an unhandled exception from the sender thread.

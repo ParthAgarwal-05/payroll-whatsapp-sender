@@ -79,8 +79,18 @@ class WhatsAppSender:
             "Content-Type": "application/json",
         }
 
-        # Rate limiting
-        rate_limit = float(os.getenv('RATE_LIMIT_MPS', '1.0'))
+        # Rate limiting — parse and validate RATE_LIMIT_MPS
+        rate_limit_raw = os.getenv('RATE_LIMIT_MPS', '1.0')
+        try:
+            rate_limit = float(rate_limit_raw)
+            if rate_limit <= 0:
+                raise ValueError("must be positive")
+        except ValueError:
+            self.logger.warning(
+                "Invalid RATE_LIMIT_MPS value '%s' — falling back to 1.0 msg/sec.",
+                rate_limit_raw,
+            )
+            rate_limit = 1.0
         from rate_limiter import RateLimiter
         self._rate_limiter = RateLimiter(max_per_second=rate_limit)
 
@@ -195,23 +205,13 @@ class WhatsAppSender:
         Returns:
             A ``dict`` ready to be serialised to JSON and sent to the API.
         """
-        parameters: list[dict[str, str]] = []
-        missing_vars: list[str] = []
-
-        for param_key, column_name in mapping.items():
-            if column_name not in row_data:
-                missing_vars.append(column_name)
-
-            value = row_data.get(column_name, "")
-            parameters.append({
-                "type": "text",
-                "parameter_name": param_key,
-                "text": str(value)
-            })
+        from validation import extract_template_parameters
+        
+        parameters, missing_vars = extract_template_parameters(mapping, row_data)
 
         if missing_vars:
             self.logger.warning(
-                "Missing data in row for columns %s (phone: %s)",
+                "Missing or empty data in row for columns %s (phone: %s)",
                 missing_vars,
                 phone,
             )
@@ -290,7 +290,7 @@ class WhatsAppSender:
                 'Response – Status: %d for phone %s',
                 response.status_code, phone,
             )
-            self.logger.debug('Response body: %s', response.text)
+            self.logger.debug('Response body: %s', mask_pii(response.text))
 
             if response.status_code in (200, 201):
                 response_data = response.json()
@@ -330,6 +330,24 @@ class WhatsAppSender:
                 "retry_after": retry_after,
             }
 
+        except requests.exceptions.ReadTimeout as exc:
+            self.logger.error("ReadTimeout for phone=%s. Message may have been sent. %s", phone, exc)
+            return {
+                "success": False,
+                "message_id": "",
+                "error": "ReadTimeout: " + str(exc),
+                "retry_after": None,
+                "ambiguous_state": True,
+            }
+        except requests.exceptions.ConnectionError as exc:
+            self.logger.error("ConnectionError for phone=%s: %s", phone, exc)
+            return {
+                "success": False,
+                "message_id": "",
+                "error": "ConnectionError: " + str(exc),
+                "retry_after": None,
+                "ambiguous_state": False,
+            }
         except requests.exceptions.RequestException as exc:
             self.logger.error(
                 "Request failed for phone=%s: %s", phone, exc
@@ -339,6 +357,7 @@ class WhatsAppSender:
                 "message_id": "",
                 "error": str(exc),
                 "retry_after": None,
+                "ambiguous_state": False,
             }
 
     # ------------------------------------------------------------------
@@ -421,6 +440,14 @@ class WhatsAppSender:
                 )
                 return result
 
+            # Check for ambiguous network state (e.g. ReadTimeout)
+            if result.get("ambiguous_state"):
+                self.logger.error(
+                    'Ambiguous network failure for %s. To prevent duplicate messages, no retries will be attempted.',
+                    phone
+                )
+                return result
+
             self.logger.warning(
                 'Attempt %d/%d failed for %s: %s',
                 attempt, max_retries, phone, error,
@@ -428,7 +455,7 @@ class WhatsAppSender:
 
             if attempt < max_retries:
                 delay = RateLimiter.get_backoff_delay(
-                    attempt, base_delay=retry_delay,
+                    attempt - 1, base_delay=retry_delay,  # 0-based as documented
                 )
                 self.logger.info('Retrying in %.1f seconds…', delay)
                 time.sleep(delay)

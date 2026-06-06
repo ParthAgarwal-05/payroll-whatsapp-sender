@@ -11,7 +11,6 @@ invalid buckets.
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -130,7 +129,9 @@ class PayrollExcelReader:
         def smart_str(val):
             """Convert value to string without trailing .0 for whole numbers."""
             if isinstance(val, float):
-                if val == '' or pd.isna(val):
+                # pd.isna is defensive — fillna('') above should have
+                # converted NaN to str, but numeric cells remain float.
+                if pd.isna(val):
                     return ''
                 if val == int(val):
                     return str(int(val))
@@ -152,11 +153,14 @@ class PayrollExcelReader:
         """Validate a single payroll row.
 
         Checks performed:
-        * ``phone`` is present and non-empty.
-        * ``phone`` contains only digits (after stripping ``+``, spaces, and
-          hyphens).
+        * ``phone`` is present, non-empty, and valid per the
+          ``phonenumbers`` library (delegated to :meth:`normalize_phone`).
         * ``employee_name`` is present and non-empty.
         * ``month_year`` is present and non-empty.
+
+        If the phone number passes validation, the normalised form is
+        written back into ``row['phone']`` so downstream code receives
+        a consistent, API-ready number.
 
         Args:
             row: A dictionary representing one spreadsheet row.
@@ -170,12 +174,18 @@ class PayrollExcelReader:
         if not phone:
             return False, f"Row {row_index}: 'phone' is missing or empty"
 
-        cleaned_phone = re.sub(r"[\+\s\-]", "", phone)
-        if not cleaned_phone.isdigit():
+        # Single validation + normalisation path via phonenumbers library
+        try:
+            normalized = self.normalize_phone(phone)
+        except ValueError as exc:
             return (
                 False,
-                f"Row {row_index}: 'phone' contains non-digit characters: '{phone}'",
+                f"Row {row_index}: invalid phone number '{phone}': {exc}",
             )
+
+        # Write the normalised phone back so downstream code can use it
+        # directly without a second normalisation pass.
+        row["phone"] = normalized
 
         # --- employee_name ---
         employee_name: str = str(row.get("employee_name", "")).strip()
@@ -250,9 +260,8 @@ class PayrollExcelReader:
         normalized, is_valid, error = _normalize(phone, default_region=region)
 
         if not is_valid:
-            self.logger.warning(
-                'Phone number may be invalid (region=%s): %s',
-                region, error,
+            raise ValueError(
+                f'Phone number invalid (region={region}): {error}'
             )
 
         return normalized

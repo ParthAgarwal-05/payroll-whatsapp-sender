@@ -184,7 +184,8 @@ class PayslipSender:
         # Count how many are already sent
         already_sent = 0
         for record in valid_records:
-            phone = self.excel_reader.normalize_phone(str(record.get('phone', '')))
+            # Phone is already normalised by validate_row() in get_valid_records()
+            phone = str(record.get('phone', ''))
             record_month_year = self.month_year or str(record.get('month_year', ''))
             if self.database.is_already_sent(phone, record_month_year, self.template_name):
                 already_sent += 1
@@ -273,7 +274,9 @@ class PayslipSender:
 
                 employee_name: str = str(record.get("employee_name", "Unknown"))
                 raw_phone: str = str(record.get("phone", ""))
-                phone: str = self.excel_reader.normalize_phone(raw_phone)
+                # Phone is already normalised by validate_row() in
+                # get_valid_records(), so use it directly.
+                phone: str = raw_phone
 
                 # Determine month/year for this record.
                 record_month_year: str = (
@@ -349,7 +352,20 @@ class PayslipSender:
                     )
                 except Exception:
                     self.logger.exception(
-                        "Failed to record result in database for %s.", phone
+                        "CRITICAL: Failed to record result in database for %s. "
+                        "Message was sent but NOT recorded — duplicate risk on re-run.",
+                        phone,
+                    )
+                    # Correct the counters: the send succeeded but the
+                    # audit trail is broken, so report this as a failure
+                    # to the operator so they can investigate.
+                    if status == "Success":
+                        self.success -= 1
+                        self.failed += 1
+                    status = "DB Error"
+                    error = (
+                        f"Message sent (id={message_id}) but database write "
+                        f"failed. Check logs for details. Duplicate risk on re-run."
                     )
 
                 self._notify_progress(employee_name, phone, status)

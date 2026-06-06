@@ -155,10 +155,28 @@ def update_env(updates: dict[str, str]) -> tuple[bool, str]:
         if key not in updated_keys:
             new_lines.append(f"\n{key}={value}\n")
 
-    # Write the updated content back.
+    # Write the updated content atomically — write to a temp file in
+    # the same directory, then rename over the original.  This prevents
+    # corruption from partial writes or concurrent reads.
+    import tempfile
     try:
-        with open(env_file, "w", encoding="utf-8", newline="\n") as fh:
-            fh.writelines(new_lines)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(env_file.parent),
+            prefix='.env.',
+            suffix='.tmp',
+        )
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as fh:
+                fh.writelines(new_lines)
+            # Atomic replace (POSIX: atomic; Windows: overwrites)
+            os.replace(tmp_path, str(env_file))
+        except BaseException:
+            # Clean up the temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         _logger.info(
             "Updated .env file — keys modified: %s",
             list(updates.keys()),
@@ -198,6 +216,22 @@ def validate_settings(settings: dict[str, str]) -> tuple[bool, str]:
 
     if missing:
         return False, "The following fields are required:\n• " + "\n• ".join(missing)
+
+    # Validate RATE_LIMIT_MPS if provided (optional field with default)
+    rate_limit_str = settings.get("RATE_LIMIT_MPS", "").strip()
+    if rate_limit_str:
+        try:
+            rate_limit_val = float(rate_limit_str)
+            if rate_limit_val <= 0:
+                return False, (
+                    "Rate Limit must be a positive number.\n"
+                    f"Got: '{rate_limit_str}'"
+                )
+        except ValueError:
+            return False, (
+                "Rate Limit must be a valid number (e.g. 1.0, 0.5, 2).\n"
+                f"Got: '{rate_limit_str}'"
+            )
 
     return True, "Valid"
 

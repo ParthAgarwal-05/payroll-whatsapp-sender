@@ -4,11 +4,14 @@ Provides persistent storage for message sending history, enabling
 duplicate detection and audit trails for payroll slip delivery.
 """
 
+import logging
 import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
+
+from logger_config import setup_logger
 
 
 class MessageDatabase:
@@ -74,10 +77,15 @@ class MessageDatabase:
 
         self._db_path: Path = db_file
         self._lock = threading.Lock()
+        self._logger: logging.Logger = setup_logger(__name__)
         self._conn: sqlite3.Connection = sqlite3.connect(
             str(self._db_path),
             check_same_thread=False,
         )
+        # Enable WAL mode for concurrent read/write and set a busy
+        # timeout so threads retry instead of raising immediately.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.row_factory = sqlite3.Row
         self._create_tables()
         self._migrate_schema()
@@ -251,4 +259,11 @@ class MessageDatabase:
             self._conn.execute(self._CREATE_INDEX_SQL)
             self._conn.commit()
         except Exception:
-            pass  # Index may not exist in a fresh database
+            # DROP INDEX IF EXISTS handles the "doesn't exist" case,
+            # so any exception here indicates a real problem (locked
+            # DB, corruption, disk full, etc.).  Log it.
+            self._logger.warning(
+                "Schema migration failed — the application will continue "
+                "but queries may be slower.",
+                exc_info=True,
+            )

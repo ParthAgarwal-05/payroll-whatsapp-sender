@@ -93,9 +93,17 @@ def mask_pii(text: str) -> str:
     text = re.sub(r'\+?\d{10,}', lambda m: m.group()[:3] + '****' + m.group()[-3:], text)
     # Mask values after sensitive keywords (case insensitive)
     for keyword in ('bank_account', 'uan', 'account', 'net_wages', 'basic',
-                    'gross_wages', 'da', 'allowances', 'pf', 'esi', 'salary'):
+                    'gross_wages', 'da', 'allowances', 'pf', 'esi', 'salary', 'other_deductions'):
+        # Standard JSON format
         text = re.sub(
             rf'("{keyword}"\s*:\s*")([^"]+)(")',
+            rf'\1***MASKED***\3',
+            text,
+            flags=re.IGNORECASE,
+        )
+        # WhatsApp API template parameter format
+        text = re.sub(
+            rf'("parameter_name"\s*:\s*"{keyword}"\s*,\s*"text"\s*:\s*")([^"]+)(")',
             rf'\1***MASKED***\3',
             text,
             flags=re.IGNORECASE,
