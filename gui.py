@@ -22,21 +22,33 @@ if platform.system() == "Windows":
         pass
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
-from dotenv import load_dotenv
-
-from config_manager import read_env, update_env, validate_settings, reload_env
-from logger_config import setup_logger, get_project_root
+from config_manager import read_env, update_env, validate_settings, reload_env, initialize_config
+from logger_config import setup_logger, get_app_dir, get_data_dir
 from send_payslips import PayslipSender
 
 # ---------------------------------------------------------------------------
 # Project paths
 # ---------------------------------------------------------------------------
-PROJECT_ROOT: Path = get_project_root()
+APP_DIR: Path = get_app_dir()    # Bundled read-only assets (templates)
+DATA_DIR: Path = get_data_dir()  # User-writable data (.env, database/, logs/, reports/)
+
+
+def _resolve_font(preferred: str, *fallbacks: str) -> str:
+    """Return the first available font family from the given options."""
+    try:
+        available = set(tkfont.families())
+    except Exception:
+        return preferred
+    for font_name in (preferred, *fallbacks):
+        if font_name in available:
+            return font_name
+    return preferred  # Tk will use its default fallback
 
 # ---------------------------------------------------------------------------
 # Colour palette
@@ -116,126 +128,6 @@ def generate_month_options() -> list[str]:
     return options
 
 
-class TemplateMappingDialog(tk.Toplevel):
-    """Dialog for editing the template mappings."""
-
-    def __init__(self, parent: tk.Tk) -> None:
-        super().__init__(parent)
-        self.title("Template Mapping Manager")
-        self.configure(bg=CARD_BG)
-        self.minsize(520, 500)
-        self.transient(parent)
-        self.grab_set()
-
-        self.mapping_file: Path = PROJECT_ROOT / "templates" / "template_mapping.json"
-        self.mappings: list[tuple[tk.StringVar, tk.StringVar, tk.Frame]] = []
-
-        # UI Setup
-        ttk.Label(self, text="Template Variables & Columns", font=("Segoe UI", 14, "bold"), background=CARD_BG, foreground=TEXT).pack(padx=20, pady=(20, 10), anchor=tk.W)
-
-        # Scrollable area
-        container = tk.Frame(self, bg=CARD_BG)
-        container.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-
-        self.canvas = tk.Canvas(container, bg=CARD_BG, highlightthickness=0)
-        scrollbar = tk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = tk.Frame(self.canvas, bg=CARD_BG)
-
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-
-        self.window_id = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(self.window_id, width=e.width))
-
-        bind_mouse_scroll(self.canvas)
-
-        self.bind("<Escape>", lambda e: self.destroy())
-        self.bind("<Control-s>", lambda e: self.save_data())
-        self.bind("<Control-S>", lambda e: self.save_data())
-
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.rows_frame = tk.Frame(self.scrollable_frame, bg=CARD_BG)
-        self.rows_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.load_data()
-
-        # Add Mapping button
-        ttk.Button(self.scrollable_frame, text="+ Add Mapping", style="Secondary.TButton", command=self.add_empty_row).pack(anchor=tk.W, pady=10)
-
-        # Save / Cancel
-        btn_frame = tk.Frame(self, bg=CARD_BG)
-        btn_frame.pack(fill=tk.X, padx=20, pady=(10, 20))
-
-        ttk.Button(btn_frame, text="Save", style="Save.TButton", command=self.save_data).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(btn_frame, text="Cancel", style="Secondary.TButton", command=self.destroy).pack(side=tk.LEFT)
-
-    def load_data(self) -> None:
-        try:
-            with open(self.mapping_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-
-        for k, v in data.items():
-            self.add_row(k, v)
-
-    def add_empty_row(self) -> None:
-        self.add_row("", "")
-
-    def add_row(self, key: str, val: str) -> None:
-        row_frame = tk.Frame(self.rows_frame, bg=CARD_BG)
-        row_frame.pack(fill=tk.X, pady=4)
-
-        k_var = tk.StringVar(value=key)
-        v_var = tk.StringVar(value=val)
-
-        ttk.Entry(row_frame, textvariable=k_var).pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
-        ttk.Label(row_frame, text="➔", style="Card.TLabel").pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Entry(row_frame, textvariable=v_var).pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
-
-        def delete_row():
-            row_frame.destroy()
-            self.mappings.remove((k_var, v_var, row_frame))
-
-        ttk.Button(row_frame, text="Delete", style="Stop.TButton", command=delete_row).pack(side=tk.LEFT)
-
-        self.mappings.append((k_var, v_var, row_frame))
-
-    def save_data(self) -> None:
-        new_data = {}
-        seen_keys = set()
-
-        for k_var, v_var, _ in self.mappings:
-            k = k_var.get().strip()
-            v = v_var.get().strip()
-
-            if not k:
-                messagebox.showerror("Error", "Variable name cannot be empty.", parent=self)
-                return
-            if not v:
-                messagebox.showerror("Error", "Excel column cannot be empty.", parent=self)
-                return
-            if k in seen_keys:
-                messagebox.showerror("Error", f"Duplicate variable name found: '{k}'", parent=self)
-                return
-
-            seen_keys.add(k)
-            new_data[k] = v
-
-        try:
-            with open(self.mapping_file, "w", encoding="utf-8") as f:
-                json.dump(new_data, f, indent=4)
-            messagebox.showinfo("Success", "Template mapping saved successfully.", parent=self)
-            self.destroy()
-        except Exception as e:
-            messagebox.showerror("Save Error", f"Could not save file:\n{e}", parent=self)
-
-
 class PayrollApp(tk.Tk):
     """Main application window for the Payroll WhatsApp Sender."""
 
@@ -246,9 +138,8 @@ class PayrollApp(tk.Tk):
         """Set up the entire GUI, load configuration and initialise state."""
         super().__init__()
 
-        # Load .env from project root
-        dotenv_path: Path = PROJECT_ROOT / ".env"
-        load_dotenv(dotenv_path)
+        # Initialize configuration (first-run setup, migration)
+        initialize_config()
 
         # Logger
         self._logger = setup_logger("gui")
@@ -282,6 +173,9 @@ class PayrollApp(tk.Tk):
         # Keyboard shortcuts & context menus
         self._bind_shortcuts()
 
+        # Validate template mapping file on startup
+        self._validate_template_file()
+
         self._logger.info("GUI initialised.")
 
     # ------------------------------------------------------------------ #
@@ -289,6 +183,12 @@ class PayrollApp(tk.Tk):
     # ------------------------------------------------------------------ #
     def _configure_styles(self) -> None:
         """Configure ttk styles for the dark theme."""
+        # Resolve fonts for cross-platform compatibility
+        self._ui_font = _resolve_font('Segoe UI', 'Helvetica Neue', 'Helvetica', 'Arial')
+        self._mono_font = _resolve_font('Consolas', 'SF Mono', 'Menlo', 'DejaVu Sans Mono', 'Courier New')
+        ui_font = self._ui_font
+        mono_font = self._mono_font
+
         style = ttk.Style(self)
         style.theme_use("clam")
 
@@ -309,19 +209,19 @@ class PayrollApp(tk.Tk):
             "TLabelframe.Label",
             background=CARD_BG,
             foreground=HIGHLIGHT,
-            font=("Segoe UI", 11, "bold"),
+            font=(ui_font, 11, "bold"),
         )
 
         # Labels
-        style.configure("TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 10))
-        style.configure("Card.TLabel", background=CARD_BG, foreground=TEXT, font=("Segoe UI", 10))
-        style.configure("Header.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 22, "bold"))
-        style.configure("Sub.TLabel", background=BG, foreground=INFO, font=("Segoe UI", 11))
-        style.configure("Success.TLabel", background=CARD_BG, foreground=SUCCESS, font=("Segoe UI", 13, "bold"))
-        style.configure("Error.TLabel", background=CARD_BG, foreground=ERROR, font=("Segoe UI", 13, "bold"))
-        style.configure("Info.TLabel", background=CARD_BG, foreground=INFO, font=("Segoe UI", 13, "bold"))
-        style.configure("Count.TLabel", background=CARD_BG, foreground=TEXT, font=("Segoe UI", 13, "bold"))
-        style.configure("Progress.TLabel", background=CARD_BG, foreground=INFO, font=("Segoe UI", 10))
+        style.configure("TLabel", background=BG, foreground=TEXT, font=(ui_font, 10))
+        style.configure("Card.TLabel", background=CARD_BG, foreground=TEXT, font=(ui_font, 10))
+        style.configure("Header.TLabel", background=BG, foreground=TEXT, font=(ui_font, 22, "bold"))
+        style.configure("Sub.TLabel", background=BG, foreground=INFO, font=(ui_font, 11))
+        style.configure("Success.TLabel", background=CARD_BG, foreground=SUCCESS, font=(ui_font, 13, "bold"))
+        style.configure("Error.TLabel", background=CARD_BG, foreground=ERROR, font=(ui_font, 13, "bold"))
+        style.configure("Info.TLabel", background=CARD_BG, foreground=INFO, font=(ui_font, 13, "bold"))
+        style.configure("Count.TLabel", background=CARD_BG, foreground=TEXT, font=(ui_font, 13, "bold"))
+        style.configure("Progress.TLabel", background=CARD_BG, foreground=INFO, font=(ui_font, 10))
 
         # Entries
         style.configure("TEntry", fieldbackground=ACCENT, foreground=TEXT, insertcolor=TEXT)
@@ -331,7 +231,7 @@ class PayrollApp(tk.Tk):
             "Accent.TButton",
             background=HIGHLIGHT,
             foreground=TEXT,
-            font=("Segoe UI", 12, "bold"),
+            font=(ui_font, 12, "bold"),
             padding=(20, 10),
         )
         style.map(
@@ -343,7 +243,7 @@ class PayrollApp(tk.Tk):
             "Secondary.TButton",
             background=ACCENT,
             foreground=TEXT,
-            font=("Segoe UI", 10),
+            font=(ui_font, 10),
             padding=(14, 6),
         )
         style.map(
@@ -355,7 +255,7 @@ class PayrollApp(tk.Tk):
             "Save.TButton",
             background=SAVE_GREEN,
             foreground=TEXT,
-            font=("Segoe UI", 11, "bold"),
+            font=(ui_font, 11, "bold"),
             padding=(18, 8),
         )
         style.map(
@@ -367,7 +267,7 @@ class PayrollApp(tk.Tk):
             "Stop.TButton",
             background="#c0392b",
             foreground=TEXT,
-            font=("Segoe UI", 12, "bold"),
+            font=(ui_font, 12, "bold"),
             padding=(20, 10),
         )
         style.map(
@@ -397,7 +297,7 @@ class PayrollApp(tk.Tk):
         self.option_add("*TCombobox*Listbox.foreground", TEXT)
         self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
         self.option_add("*TCombobox*Listbox.selectForeground", TEXT)
-        self.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
+        self.option_add("*TCombobox*Listbox.font", (ui_font, 10))
 
         # Progressbar
         style.configure(
@@ -505,7 +405,7 @@ class PayrollApp(tk.Tk):
         widget = event.widget
         menu = tk.Menu(self, tearoff=0, bg=CARD_BG, fg=TEXT,
                        activebackground=ACCENT, activeforeground=TEXT,
-                       font=("Segoe UI", 10))
+                       font=(self._ui_font, 10))
 
         has_selection = False
         try:
@@ -562,7 +462,7 @@ class PayrollApp(tk.Tk):
         widget = event.widget
         menu = tk.Menu(self, tearoff=0, bg=CARD_BG, fg=TEXT,
                        activebackground=ACCENT, activeforeground=TEXT,
-                       font=("Segoe UI", 10))
+                       font=(self._ui_font, 10))
 
         has_selection = False
         try:
@@ -676,7 +576,7 @@ class PayrollApp(tk.Tk):
             fg=TEXT,
             insertbackground=TEXT,
             relief="flat",
-            font=("Segoe UI", 10),
+            font=(self._ui_font, 10),
         )
         self._token_entry.grid(row=4, column=1, sticky=tk.EW, padx=4, pady=5)
 
@@ -687,9 +587,27 @@ class PayrollApp(tk.Tk):
         )
         self._toggle_btn.grid(row=4, column=2, padx=(4, 0), pady=5)
 
-        # --- Row 5: Save Settings button ---
+        # --- Row 5: Default Region ---
+        ttk.Label(inner, text='Default Region:', style='Card.TLabel').grid(
+            row=5, column=0, sticky=tk.W, padx=(0, 8), pady=5
+        )
+        self._default_region_var = tk.StringVar(value=env_data.get('DEFAULT_REGION', 'IN'))
+        ttk.Entry(inner, textvariable=self._default_region_var, width=52).grid(
+            row=5, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=5
+        )
+
+        # --- Row 6: Rate Limit ---
+        ttk.Label(inner, text='Rate Limit (msg/sec):', style='Card.TLabel').grid(
+            row=6, column=0, sticky=tk.W, padx=(0, 8), pady=5
+        )
+        self._rate_limit_var = tk.StringVar(value=env_data.get('RATE_LIMIT_MPS', '1.0'))
+        ttk.Entry(inner, textvariable=self._rate_limit_var, width=52).grid(
+            row=6, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=5
+        )
+
+        # --- Row 7: Save Settings button ---
         btn_frame = ttk.Frame(inner, style="Card.TFrame")
-        btn_frame.grid(row=5, column=0, columnspan=3, pady=(10, 2))
+        btn_frame.grid(row=7, column=0, columnspan=3, pady=(10, 2))
 
         ttk.Button(
             btn_frame, text="💾  Save Settings", style="Save.TButton", command=self.save_settings
@@ -720,9 +638,6 @@ class PayrollApp(tk.Tk):
         self._excel_entry.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=6)
         ttk.Button(inner, text="Browse…", style="Secondary.TButton", command=self.browse_file).grid(
             row=0, column=2, padx=(6, 0), pady=6
-        )
-        ttk.Button(inner, text="⚙️ Template Mapping", style="Secondary.TButton", command=self.open_template_mapping).grid(
-            row=0, column=3, padx=(6, 0), pady=6
         )
 
         # Row 1 — Month / Year (read-only dropdown)
@@ -790,7 +705,7 @@ class PayrollApp(tk.Tk):
             wrap=tk.WORD,
             bg="#0d1b2a",
             fg=TEXT,
-            font=("Consolas", 10),
+            font=(self._mono_font, 10),
             insertbackground=TEXT,
             selectbackground=ACCENT,
             borderwidth=0,
@@ -851,6 +766,61 @@ class PayrollApp(tk.Tk):
         ).pack(side=tk.LEFT)
 
     # ------------------------------------------------------------------ #
+    # Template mapping validation
+    # ------------------------------------------------------------------ #
+    def _validate_template_file(self) -> None:
+        """Validate that template_mapping.json exists and is well-formed.
+
+        If validation fails, the Start button is disabled and an error
+        is shown in the activity log.
+        """
+        mapping_path: Path = APP_DIR / 'templates' / 'template_mapping.json'
+
+        if not mapping_path.is_file():
+            self._start_btn.configure(state=tk.DISABLED)
+            self.log_message(
+                f"ERROR: Template mapping file not found: {mapping_path}",
+                tag="error",
+            )
+            self._logger.error("Template mapping file not found: %s", mapping_path)
+            return
+
+        try:
+            with open(mapping_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except json.JSONDecodeError as exc:
+            self._start_btn.configure(state=tk.DISABLED)
+            self.log_message(
+                f"ERROR: Invalid JSON in template mapping file: {exc}",
+                tag="error",
+            )
+            self._logger.error("Invalid JSON in template mapping: %s", exc)
+            return
+
+        if not isinstance(data, dict) or not data:
+            self._start_btn.configure(state=tk.DISABLED)
+            self.log_message(
+                "ERROR: Template mapping file is empty or not a valid mapping.",
+                tag="error",
+            )
+            return
+
+        for name, mapping in data.items():
+            if not isinstance(mapping, dict):
+                self._start_btn.configure(state=tk.DISABLED)
+                self.log_message(
+                    f"ERROR: Mapping for template '{name}' is not a valid object.",
+                    tag="error",
+                )
+                return
+
+        available = ", ".join(sorted(data.keys()))
+        self.log_message(f"Template mappings loaded: {available}", tag="info")
+        self._logger.info(
+            "Template mapping file validated (%d template(s))", len(data)
+        )
+
+    # ------------------------------------------------------------------ #
     # Settings actions
     # ------------------------------------------------------------------ #
     def _get_gui_settings(self) -> dict[str, str]:
@@ -865,6 +835,8 @@ class PayrollApp(tk.Tk):
             "TEMPLATE_NAME": self._template_var.get().strip(),
             "TEMPLATE_LANGUAGE": self._template_lang_var.get().strip(),
             "API_VERSION": self._api_version_var.get().strip(),
+            "DEFAULT_REGION": self._default_region_var.get().strip(),
+            "RATE_LIMIT_MPS": self._rate_limit_var.get().strip(),
         }
 
     def save_settings(self) -> None:
@@ -914,21 +886,26 @@ class PayrollApp(tk.Tk):
     # Public actions
     # ------------------------------------------------------------------ #
     def browse_file(self) -> None:
-        """Open a file dialog for Excel files and populate the entry."""
+        """Open a file dialog for Excel files.
+
+        On Linux, attempts native dialogs (zenity/kdialog) first for
+        better desktop integration. Falls back to Tk's built-in dialog.
+        On Windows (the target platform), uses Tk's dialog directly.
+        """
         system: str = platform.system()
         filepath: str = ""
 
         if system == "Linux":
             try:
                 result = subprocess.run(
-                    ["zenity", "--file-selection", "--title=Select Payroll Excel File", "--file-filter=Excel Files | *.xlsx *.xls", f"--filename={PROJECT_ROOT}/"],
+                    ["zenity", "--file-selection", "--title=Select Payroll Excel File", "--file-filter=Excel Files | *.xlsx *.xls", f"--filename={DATA_DIR}/"],
                     capture_output=True, text=True, check=True
                 )
                 filepath = result.stdout.strip()
             except Exception:
                 try:
                     result = subprocess.run(
-                        ["kdialog", "--getopenfilename", str(PROJECT_ROOT), "*.xlsx *.xls"],
+                        ["kdialog", "--getopenfilename", str(DATA_DIR), "*.xlsx *.xls"],
                         capture_output=True, text=True, check=True
                     )
                     filepath = result.stdout.strip()
@@ -939,16 +916,12 @@ class PayrollApp(tk.Tk):
             filepath = filedialog.askopenfilename(
                 title="Select Payroll Excel File",
                 filetypes=[("Excel Files", "*.xlsx *.xls"), ("All Files", "*.*")],
-                initialdir=str(PROJECT_ROOT),
+                initialdir=str(DATA_DIR),
             )
 
         if filepath:
             self._excel_var.set(filepath)
             self.log_message(f"Selected file: {filepath}", tag="info")
-
-    def open_template_mapping(self) -> None:
-        """Open the Template Mapping Manager dialog."""
-        TemplateMappingDialog(self)
 
     def start_sending(self) -> None:
         """Validate inputs, save settings, create a PayslipSender and start sending."""
@@ -1005,26 +978,58 @@ class PayrollApp(tk.Tk):
 
         self.log_message("Settings saved. Initialising sender…", tag="info")
 
-        # --- Create sender & launch thread ---
+        # --- Create sender ---
         try:
             self._sender = PayslipSender(
                 excel_path=excel_path,
                 template_name=template_name,
                 month_year=month_year,
             )
-            # Register callbacks
             self._sender.set_progress_callback(self.on_progress)
             self._sender.set_completion_callback(self.on_completion)
         except Exception as exc:
-            messagebox.showerror("Initialisation Error", str(exc))
+            messagebox.showerror('Initialisation Error', str(exc))
             self._start_btn.configure(state=tk.NORMAL)
             self._stop_btn.configure(state=tk.DISABLED)
-            self._logger.exception("Failed to create PayslipSender.")
+            self._logger.exception('Failed to create PayslipSender.')
             return
 
+        # --- Preview and confirm (Issue C7) ---
+        try:
+            preview = self._sender.get_preview()
+            confirm_msg = (
+                f"Ready to send WhatsApp messages:\n\n"
+                f"  Template:        {preview['template_name']}\n"
+                f"  Month/Year:      {preview['month_year']}\n"
+                f"  Valid records:   {preview['valid_count']}\n"
+                f"  Invalid (skip):  {preview['invalid_count']}\n"
+                f"  Already sent:    {preview['already_sent_count']}\n"
+                f"  New to send:     {preview['new_count']}\n"
+            )
+            if preview['sample_names']:
+                confirm_msg += f"\n  First recipients: {', '.join(preview['sample_names'])}\n"
+            confirm_msg += f"\nProceed with sending {preview['new_count']} message(s)?"
+
+            if not messagebox.askyesno('Confirm Send', confirm_msg, icon='warning'):
+                self.log_message('Send cancelled by user.', tag='warning')
+                self._start_btn.configure(state=tk.NORMAL)
+                self._stop_btn.configure(state=tk.DISABLED)
+                return
+        except Exception as exc:
+            # If preview fails, still allow sending with basic confirmation
+            if not messagebox.askyesno(
+                'Confirm Send',
+                f'Could not generate preview ({exc}).\n\nProceed anyway?',
+                icon='warning',
+            ):
+                self._start_btn.configure(state=tk.NORMAL)
+                self._stop_btn.configure(state=tk.DISABLED)
+                return
+
+        # --- Launch thread ---
         self._send_thread = threading.Thread(target=self._run_sender, daemon=True)
         self._send_thread.start()
-        self.log_message("Sending started.", tag="info")
+        self.log_message('Sending started.', tag='info')
 
     def stop_sending(self) -> None:
         """Signal the background sender to stop and re-enable the Start button."""
@@ -1074,7 +1079,7 @@ class PayrollApp(tk.Tk):
 
     def open_reports_folder(self) -> None:
         """Open the ``reports/`` directory in the system file manager."""
-        reports_dir: Path = PROJECT_ROOT / "reports"
+        reports_dir: Path = DATA_DIR / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         path_str: str = str(reports_dir)
 
@@ -1201,7 +1206,7 @@ class PayrollApp(tk.Tk):
 
     def _view_history(self) -> None:
         """Open a dialog listing recent CSV reports."""
-        reports_dir: Path = PROJECT_ROOT / "reports"
+        reports_dir: Path = DATA_DIR / "reports"
         if not reports_dir.exists():
             messagebox.showinfo("No History", "No reports have been generated yet.")
             return
@@ -1220,7 +1225,7 @@ class PayrollApp(tk.Tk):
         dialog.grab_set()
 
         ttk.Label(
-            dialog, text="Recent Reports", font=("Segoe UI", 14, "bold"), background=CARD_BG, foreground=TEXT
+            dialog, text="Recent Reports", font=(self._ui_font, 14, "bold"), background=CARD_BG, foreground=TEXT
         ).pack(padx=14, pady=(14, 6), anchor=tk.W)
 
         listbox_frame = tk.Frame(dialog, bg=CARD_BG)
@@ -1233,7 +1238,7 @@ class PayrollApp(tk.Tk):
             listbox_frame,
             bg="#0d1b2a",
             fg=TEXT,
-            font=("Consolas", 10),
+            font=(self._mono_font, 10),
             selectbackground=ACCENT,
             highlightthickness=0,
             borderwidth=0,

@@ -1,8 +1,9 @@
 # System dependency (not pip-installable):
-#   sudo apt-get install -y python3-tk
+#   sudo apt-get install -y python3-tk  (Linux only; bundled with Python on Windows)
 #
-# Python packages:
-pandas>=2.2.0
-openpyxl>=3.1.0
-requests>=2.31.0
-python-dotenv>=1.0.0
+# Python packages (pinned for reproducible builds):
+pandas>=2.2.0,<3.0.0
+openpyxl>=3.1.0,<4.0.0
+requests>=2.31.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
+phonenumbers>=8.13.0,<9.0.0

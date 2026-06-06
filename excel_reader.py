@@ -43,6 +43,7 @@ class PayrollExcelReader:
         """
         self.file_path: Path = Path(file_path)
         self.logger: logging.Logger = setup_logger(__name__)
+        self._cached_df: pd.DataFrame | None = None
 
     # ------------------------------------------------------------------
     # File-level validation
@@ -73,7 +74,10 @@ class PayrollExcelReader:
 
         # 3. Readability
         try:
-            df = pd.read_excel(self.file_path, nrows=0)
+            if self._cached_df is not None:
+                df = self._cached_df
+            else:
+                df = pd.read_excel(self.file_path, nrows=0)
         except Exception as exc:  # noqa: BLE001
             msg = f"Unable to open Excel file: {exc}"
             self.logger.error(msg)
@@ -98,13 +102,20 @@ class PayrollExcelReader:
         """Read the entire Excel file and return a list of row dictionaries.
 
         Processing steps:
-        1. Strip whitespace from column names and lower-case them.
-        2. Drop rows that are completely empty.
-        3. Convert every cell value to a stripped string (NaN → ``""``).
+        1. Return cached data if available.
+        2. Strip whitespace from column names and lower-case them.
+        3. Drop rows that are completely empty.
+        4. Convert every cell value to a stripped string (NaN → ``""``).
+           Whole-number floats are rendered without trailing ``.0``.
 
         Returns:
             A list of ``dict`` objects, one per non-empty row.
         """
+        if self._cached_df is not None:
+            records = self._cached_df.to_dict(orient='records')
+            self.logger.debug('Returning %d cached row(s)', len(records))
+            return records
+
         df = pd.read_excel(self.file_path)
 
         # Normalise column names
@@ -113,11 +124,22 @@ class PayrollExcelReader:
         # Drop fully-empty rows
         df.dropna(how="all", inplace=True)
 
-        # Replace NaN → "" and coerce everything to str
-        df = df.fillna("")
-        df = df.astype(str)
-        df = df.apply(lambda col: col.str.strip())
+        # Replace NaN → "" and convert to string intelligently
+        df = df.fillna('')
 
+        def smart_str(val):
+            """Convert value to string without trailing .0 for whole numbers."""
+            if isinstance(val, float):
+                if val == '' or pd.isna(val):
+                    return ''
+                if val == int(val):
+                    return str(int(val))
+                return str(val)
+            return str(val).strip()
+
+        df = df.apply(lambda col: col.map(smart_str))
+
+        self._cached_df = df  # Cache the processed DataFrame
         records: list[dict[str, Any]] = df.to_dict(orient="records")
         self.logger.info("Read %d row(s) from %s", len(records), self.file_path)
         return records
@@ -207,40 +229,39 @@ class PayrollExcelReader:
     # Phone normalisation
     # ------------------------------------------------------------------
 
-    def normalize_phone(self, phone: str) -> str:
-        """Normalise a phone number for the WhatsApp Business API.
-
-        Rules applied in order:
-        1. Remove spaces, hyphens, and parentheses.
-        2. If the number starts with ``+``, strip the ``+`` and keep the rest.
-        3. If the number starts with ``0``, replace the leading ``0`` with
-           ``91`` (India country code).
-        4. If the resulting number has 10 or fewer digits (no country code),
-           prepend ``91``.
-        5. Return **digits only** — no ``+`` sign — as expected by the
-           WhatsApp API.
+    def normalize_phone(self, phone: str, default_region: str | None = None) -> str:
+        """Normalise a phone number using the phonenumbers library.
 
         Args:
             phone: Raw phone string from the spreadsheet.
+            default_region: ISO 3166-1 alpha-2 region code. Defaults to
+                the DEFAULT_REGION environment variable, or 'IN'.
 
         Returns:
             A digits-only phone string ready for the WhatsApp API.
+
+        Raises:
+            ValueError: If the phone number is invalid and cannot be normalised.
         """
-        # Step 1 – strip whitespace, hyphens, parentheses
-        cleaned: str = re.sub(r"[\s\-\(\)]", "", phone)
+        import os
+        from phone_utils import normalize_phone as _normalize
 
-        # Step 2 – handle leading '+'
-        if cleaned.startswith("+"):
-            cleaned = cleaned[1:]
-        # Step 3 – handle leading '0' (local Indian number)
-        elif cleaned.startswith("0"):
-            cleaned = "91" + cleaned[1:]
+        region = default_region or os.getenv('DEFAULT_REGION', 'IN')
+        normalized, is_valid, error = _normalize(phone, default_region=region)
 
-        # Step 4 – short numbers without country code
-        if len(cleaned) <= 10:
-            cleaned = "91" + cleaned
+        if not is_valid:
+            self.logger.warning(
+                'Phone number may be invalid (region=%s): %s',
+                region, error,
+            )
 
-        # Step 5 – return digits only
-        cleaned = re.sub(r"\D", "", cleaned)
+        return normalized
 
-        return cleaned
+    # ------------------------------------------------------------------
+    # Column normalisation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def normalize_column_name(name: str) -> str:
+        """Normalize a column name for case-insensitive matching."""
+        return str(name).strip().lower()

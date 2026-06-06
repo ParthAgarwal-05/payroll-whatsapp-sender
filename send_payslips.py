@@ -63,14 +63,22 @@ class PayslipSender:
         self.database: MessageDatabase = MessageDatabase()
         self.excel_reader: PayrollExcelReader = PayrollExcelReader(excel_path)
 
-        # Load the template mapping from the JSON file.
-        self.mapping: dict = self.whatsapp_sender.load_template_mapping()
-
         # Resolve template name: explicit arg → env var fallback.
         self.template_name: str = (
             template_name
             if template_name
             else (os.getenv("TEMPLATE_NAME") or "")
+        )
+
+        if not self.template_name:
+            raise ValueError(
+                "Template name is required. Provide it explicitly or set "
+                "the TEMPLATE_NAME environment variable."
+            )
+
+        # Load the parameter mapping for this template from the JSON file.
+        self.mapping: dict = self.whatsapp_sender.load_template_mapping(
+            self.template_name
         )
 
         # month_year may be overridden per-row if left as None.
@@ -155,6 +163,45 @@ class PayslipSender:
             except Exception:
                 self.logger.exception("Progress callback raised an exception.")
 
+    def get_preview(self) -> dict[str, Any]:
+        """Generate a preview of the send operation without sending.
+
+        Returns:
+            A dict with keys: ``total_records``, ``valid_count``,
+            ``invalid_count``, ``template_name``, ``month_year``,
+            ``sample_names`` (first 5 employee names),
+            ``already_sent_count``, ``new_count``.
+
+        Raises:
+            ValueError: If the Excel file fails validation.
+        """
+        is_valid, msg = self.excel_reader.validate_file()
+        if not is_valid:
+            raise ValueError(f'Excel validation failed: {msg}')
+
+        valid_records, invalid_records = self.excel_reader.get_valid_records()
+
+        # Count how many are already sent
+        already_sent = 0
+        for record in valid_records:
+            phone = self.excel_reader.normalize_phone(str(record.get('phone', '')))
+            record_month_year = self.month_year or str(record.get('month_year', ''))
+            if self.database.is_already_sent(phone, record_month_year, self.template_name):
+                already_sent += 1
+
+        sample_names = [str(r.get('employee_name', 'Unknown')) for r in valid_records[:5]]
+
+        return {
+            'total_records': len(valid_records) + len(invalid_records),
+            'valid_count': len(valid_records),
+            'invalid_count': len(invalid_records),
+            'template_name': self.template_name,
+            'month_year': self.month_year or '(from Excel data)',
+            'sample_names': sample_names,
+            'already_sent_count': already_sent,
+            'new_count': len(valid_records) - already_sent,
+        }
+
     def process_all(self) -> dict[str, Any]:
         """Process every valid record in the Excel file.
 
@@ -184,158 +231,174 @@ class PayslipSender:
         self.skipped = 0
         self.results = []
 
-        # ----------------------------------------------------------
-        # Validate & read Excel
-        # ----------------------------------------------------------
-        is_valid, validation_msg = self.excel_reader.validate_file()
-        if not is_valid:
-            error_msg = f"Excel validation failed: {validation_msg}"
-            self.logger.error(error_msg)
-            raise ValueError(error_msg)
+        try:
+            # ----------------------------------------------------------
+            # Validate & read Excel
+            # ----------------------------------------------------------
+            is_valid, validation_msg = self.excel_reader.validate_file()
+            if not is_valid:
+                error_msg = f"Excel validation failed: {validation_msg}"
+                self.logger.error(error_msg)
+                raise ValueError(error_msg)
 
-        valid_records, invalid_records = self.excel_reader.get_valid_records()
+            valid_records, invalid_records = self.excel_reader.get_valid_records()
 
-        if invalid_records:
-            self.logger.warning(
-                "%d invalid records found — these will be skipped.",
-                len(invalid_records),
-            )
+            if invalid_records:
+                self.logger.warning(
+                    "%d invalid records found — these will be skipped.",
+                    len(invalid_records),
+                )
 
-        self.total = len(valid_records)
-        self.logger.info("Processing %d valid records.", self.total)
+            # Validate template mapping against sample data
+            if valid_records:
+                is_mapping_valid, mapping_error = self.whatsapp_sender.validate_template_mapping_data(
+                    self.mapping, valid_records[0]
+                )
+                if not is_mapping_valid:
+                    error_msg = f'Template mapping validation failed: {mapping_error}'
+                    self.logger.error(error_msg)
+                    raise ValueError(error_msg)
 
-        # ----------------------------------------------------------
-        # Iterate over valid records
-        # ----------------------------------------------------------
-        for index, record in enumerate(valid_records, start=1):
-            # Check for cancellation.
-            if self._stop_event.is_set():
-                self.logger.info("Stop event detected at record %d/%d.", index, self.total)
-                break
+            self.total = len(valid_records)
+            self.logger.info("Processing %d valid records.", self.total)
 
-            employee_name: str = str(record.get("employee_name", "Unknown"))
-            raw_phone: str = str(record.get("phone", ""))
-            phone: str = self.excel_reader.normalize_phone(raw_phone)
+            # ----------------------------------------------------------
+            # Iterate over valid records
+            # ----------------------------------------------------------
+            for index, record in enumerate(valid_records, start=1):
+                # Check for cancellation.
+                if self._stop_event.is_set():
+                    self.logger.info("Stop event detected at record %d/%d.", index, self.total)
+                    break
 
-            # Determine month/year for this record.
-            record_month_year: str = (
-                self.month_year
-                if self.month_year
-                else str(record.get("month_year", datetime.now().strftime("%B %Y")))
-            )
+                employee_name: str = str(record.get("employee_name", "Unknown"))
+                raw_phone: str = str(record.get("phone", ""))
+                phone: str = self.excel_reader.normalize_phone(raw_phone)
 
-            self.logger.info(
-                "[%d/%d] Processing %s (%s) for %s",
-                index,
-                self.total,
-                employee_name,
-                phone,
-                record_month_year,
-            )
+                # Determine month/year for this record.
+                record_month_year: str = (
+                    self.month_year
+                    if self.month_year
+                    else str(record.get("month_year", datetime.now().strftime("%B %Y")))
+                )
 
-            # Duplicate check.
-            if self.database.is_already_sent(phone, record_month_year, self.template_name):
                 self.logger.info(
-                    "Already sent to %s for %s — skipping.",
+                    "[%d/%d] Processing %s (%s) for %s",
+                    index,
+                    self.total,
+                    employee_name,
                     phone,
                     record_month_year,
                 )
-                self.skipped += 1
-                self._notify_progress(employee_name, phone, "Already Sent")
+
+                # Duplicate check.
+                if self.database.is_already_sent(phone, record_month_year, self.template_name):
+                    self.logger.info(
+                        "Already sent to %s for %s — skipping.",
+                        phone,
+                        record_month_year,
+                    )
+                    self.skipped += 1
+                    self._notify_progress(employee_name, phone, "Already Sent")
+                    self.results.append(
+                        {
+                            "employee_name": employee_name,
+                            "phone": phone,
+                            "month_year": record_month_year,
+                            "status": "Already Sent",
+                            "message_id": "",
+                            "error": "",
+                        }
+                    )
+                    continue
+
+                # Attempt to send with retry.
+                result: dict = self.whatsapp_sender.send_with_retry(
+                    phone=phone,
+                    template_name=self.template_name,
+                    row_data=record,
+                    mapping=self.mapping,
+                )
+
+                message_id: str = result.get("message_id", "")
+                error: str = result.get("error", "")
+
+                if result.get("success"):
+                    status = "Success"
+                    self.success += 1
+                    self.logger.info(
+                        "Message sent to %s — message_id=%s", phone, message_id
+                    )
+                else:
+                    status = "Failed"
+                    self.failed += 1
+                    self.logger.error(
+                        "Failed to send to %s: %s", phone, error
+                    )
+
+                # Persist result in database.
+                try:
+                    self.database.record_message(
+                        employee_name=employee_name,
+                        phone=phone,
+                        month_year=record_month_year,
+                        template_name=self.template_name,
+                        message_id=message_id,
+                        status=status,
+                        error_details=error,
+                    )
+                except Exception:
+                    self.logger.exception(
+                        "Failed to record result in database for %s.", phone
+                    )
+
+                self._notify_progress(employee_name, phone, status)
+
                 self.results.append(
                     {
                         "employee_name": employee_name,
                         "phone": phone,
                         "month_year": record_month_year,
-                        "status": "Already Sent",
-                        "message_id": "",
-                        "error": "",
+                        "status": status,
+                        "message_id": message_id,
+                        "error": error,
                     }
                 )
-                continue
 
-            # Attempt to send with retry.
-            result: dict = self.whatsapp_sender.send_with_retry(
-                phone=phone,
-                template_name=self.template_name,
-                row_data=record,
-                mapping=self.mapping,
+            # ----------------------------------------------------------
+            # Generate report & invoke completion callback
+            # ----------------------------------------------------------
+            report_path: str = self.generate_report()
+
+            # Clean up old reports to prevent unbounded disk usage
+            self.cleanup_old_reports()
+
+            summary: dict[str, Any] = {
+                "total": self.total,
+                "success": self.success,
+                "failed": self.failed,
+                "skipped": self.skipped,
+                "report_path": report_path,
+            }
+
+            self.logger.info(
+                "Distribution complete — total=%d, success=%d, failed=%d, skipped=%d, report=%s",
+                self.total,
+                self.success,
+                self.failed,
+                self.skipped,
+                report_path,
             )
 
-            message_id: str = result.get("message_id", "")
-            error: str = result.get("error", "")
+            if self._completion_callback is not None:
+                try:
+                    self._completion_callback(summary)
+                except Exception:
+                    self.logger.exception("Completion callback raised an exception.")
 
-            if result.get("success"):
-                status = "Success"
-                self.success += 1
-                self.logger.info(
-                    "Message sent to %s — message_id=%s", phone, message_id
-                )
-            else:
-                status = "Failed"
-                self.failed += 1
-                self.logger.error(
-                    "Failed to send to %s: %s", phone, error
-                )
-
-            # Persist result in database.
-            try:
-                self.database.record_message(
-                    employee_name=employee_name,
-                    phone=phone,
-                    month_year=record_month_year,
-                    template_name=self.template_name,
-                    message_id=message_id,
-                    status=status,
-                    error_details=error,
-                )
-            except Exception:
-                self.logger.exception(
-                    "Failed to record result in database for %s.", phone
-                )
-
-            self._notify_progress(employee_name, phone, status)
-
-            self.results.append(
-                {
-                    "employee_name": employee_name,
-                    "phone": phone,
-                    "month_year": record_month_year,
-                    "status": status,
-                    "message_id": message_id,
-                    "error": error,
-                }
-            )
-
-        # ----------------------------------------------------------
-        # Generate report & invoke completion callback
-        # ----------------------------------------------------------
-        report_path: str = self.generate_report()
-
-        summary: dict[str, Any] = {
-            "total": self.total,
-            "success": self.success,
-            "failed": self.failed,
-            "skipped": self.skipped,
-            "report_path": report_path,
-        }
-
-        self.logger.info(
-            "Distribution complete — total=%d, success=%d, failed=%d, skipped=%d, report=%s",
-            self.total,
-            self.success,
-            self.failed,
-            self.skipped,
-            report_path,
-        )
-
-        if self._completion_callback is not None:
-            try:
-                self._completion_callback(summary)
-            except Exception:
-                self.logger.exception("Completion callback raised an exception.")
-
-        return summary
+            return summary
+        finally:
+            self.database.close()
 
     # ------------------------------------------------------------------
     # Reporting
@@ -345,15 +408,14 @@ class PayslipSender:
         """Generate a CSV report of all processed records.
 
         The report is saved under a ``reports/`` directory relative to
-        the project root.  The directory is created automatically if it
-        does not already exist.
+        the user data directory.  The directory is created automatically
+        if it does not already exist.
 
         Returns:
             Absolute path to the generated CSV report file.
         """
-        from logger_config import get_project_root
-        project_root: Path = get_project_root()
-        reports_dir: Path = project_root / "reports"
+        from logger_config import get_data_dir
+        reports_dir: Path = get_data_dir() / 'reports'
         reports_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp: str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -384,6 +446,41 @@ class PayslipSender:
             return ""
 
         return str(report_path)
+
+    # ------------------------------------------------------------------
+    # Report retention
+    # ------------------------------------------------------------------
+
+    def cleanup_old_reports(self, max_reports: int = 100) -> int:
+        """Remove old report files, keeping the most recent ones.
+
+        Args:
+            max_reports: Maximum number of report files to retain.
+
+        Returns:
+            Number of files deleted.
+        """
+        from logger_config import get_data_dir
+        reports_dir = get_data_dir() / 'reports'
+        if not reports_dir.exists():
+            return 0
+
+        csv_files = sorted(
+            reports_dir.glob('*.csv'),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        deleted = 0
+        for old_file in csv_files[max_reports:]:
+            try:
+                old_file.unlink()
+                deleted += 1
+            except OSError:
+                self.logger.warning('Could not delete old report: %s', old_file)
+
+        if deleted:
+            self.logger.info('Cleaned up %d old report(s)', deleted)
+        return deleted
 
     # ------------------------------------------------------------------
     # Threaded execution

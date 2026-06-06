@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from logger_config import get_project_root, setup_logger
+from logger_config import get_data_dir, get_app_dir, setup_logger
 
 # Keys managed by the GUI settings panel.
 MANAGED_KEYS: list[str] = [
@@ -18,6 +18,8 @@ MANAGED_KEYS: list[str] = [
     "TEMPLATE_NAME",
     "TEMPLATE_LANGUAGE",
     "API_VERSION",
+    "DEFAULT_REGION",
+    "RATE_LIMIT_MPS",
 ]
 
 _logger = setup_logger("config_manager")
@@ -25,7 +27,21 @@ _logger = setup_logger("config_manager")
 
 def _env_path() -> Path:
     """Return the absolute path to the ``.env`` file."""
-    return get_project_root() / ".env"
+    return get_data_dir() / ".env"
+
+
+def initialize_config() -> None:
+    """Initialize configuration on first run.
+
+    1. Ensures the data directory exists.
+    2. Migrates legacy .env from project root if needed.
+    3. Creates .env from .env.example if no .env exists.
+    4. Loads .env into os.environ.
+    """
+    from secret_manager import SecretManager
+    SecretManager.migrate_legacy_env()
+    SecretManager.ensure_env_exists()
+    reload_env()
 
 
 def read_env() -> dict[str, str]:
@@ -155,6 +171,9 @@ def update_env(updates: dict[str, str]) -> tuple[bool, str]:
 
 def validate_settings(settings: dict[str, str]) -> tuple[bool, str]:
     """Validate that all required configuration fields are non-empty.
+
+    ``DEFAULT_REGION`` and ``RATE_LIMIT_MPS`` are optional and have
+    sensible defaults, so they are **not** required here.
 
     Args:
         settings: A ``dict`` mapping config key names to their values.

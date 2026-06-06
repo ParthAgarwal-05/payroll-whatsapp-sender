@@ -5,6 +5,7 @@ duplicate detection and audit trails for payroll slip delivery.
 """
 
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -16,6 +17,9 @@ class MessageDatabase:
     Tracks every message attempt (success or failure) and provides
     duplicate-detection so the same payslip is never sent twice for
     a given phone + month + template combination.
+
+    All public methods are thread-safe — a :class:`threading.Lock`
+    serialises access to the underlying SQLite connection.
 
     Usage::
 
@@ -46,7 +50,7 @@ class MessageDatabase:
     """
 
     _CREATE_INDEX_SQL = """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_phone_month_template
+        CREATE INDEX IF NOT EXISTS idx_phone_month_template
         ON message_history (phone, month_year, template_name)
     """
 
@@ -56,12 +60,12 @@ class MessageDatabase:
         Args:
             db_path: Optional explicit path to the SQLite database file.
                      When *None*, the database is created at
-                     ``<project_root>/database/history.db``.
+                     ``<data_dir>/database/history.db``.
         """
         if db_path is None:
-            from logger_config import get_project_root
-            project_root = get_project_root()
-            db_file = project_root / "database" / "history.db"
+            from logger_config import get_data_dir
+            data_dir = get_data_dir()
+            db_file = data_dir / "database" / "history.db"
         else:
             db_file = Path(db_path)
 
@@ -69,12 +73,14 @@ class MessageDatabase:
         db_file.parent.mkdir(parents=True, exist_ok=True)
 
         self._db_path: Path = db_file
+        self._lock = threading.Lock()
         self._conn: sqlite3.Connection = sqlite3.connect(
             str(self._db_path),
             check_same_thread=False,
         )
         self._conn.row_factory = sqlite3.Row
         self._create_tables()
+        self._migrate_schema()
 
     # ------------------------------------------------------------------
     # Context-manager support
@@ -116,19 +122,20 @@ class MessageDatabase:
             ``True`` if a matching success record is found, ``False``
             otherwise.
         """
-        cursor = self._conn.execute(
-            """
-            SELECT 1
-              FROM message_history
-             WHERE phone         = ?
-               AND month_year    = ?
-               AND template_name = ?
-               AND status        = 'Success'
-             LIMIT 1
-            """,
-            (phone, month_year, template_name),
-        )
-        return cursor.fetchone() is not None
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                SELECT 1
+                  FROM message_history
+                 WHERE phone         = ?
+                   AND month_year    = ?
+                   AND template_name = ?
+                   AND status        = 'Success'
+                 LIMIT 1
+                """,
+                (phone, month_year, template_name),
+            )
+            return cursor.fetchone() is not None
 
     def record_message(
         self,
@@ -142,9 +149,8 @@ class MessageDatabase:
     ) -> None:
         """Insert a message-history record.
 
-        If a row with the same ``(phone, month_year, template_name)``
-        already exists it is replaced (``INSERT OR REPLACE``) so that
-        retries after a failure can overwrite the earlier record.
+        Every attempt (success **and** failure) is recorded as a separate
+        row to maintain a complete audit trail.
 
         Args:
             employee_name: Full name of the employee.
@@ -158,25 +164,26 @@ class MessageDatabase:
             error_details: Human-readable error description (optional).
         """
         timestamp = datetime.now().isoformat()
-        self._conn.execute(
-            """
-            INSERT OR REPLACE INTO message_history
-                (employee_name, phone, month_year, template_name,
-                 message_id, status, timestamp, error_details)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                employee_name,
-                phone,
-                month_year,
-                template_name,
-                message_id,
-                status,
-                timestamp,
-                error_details,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO message_history
+                    (employee_name, phone, month_year, template_name,
+                     message_id, status, timestamp, error_details)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    employee_name,
+                    phone,
+                    month_year,
+                    template_name,
+                    message_id,
+                    status,
+                    timestamp,
+                    error_details,
+                ),
+            )
+            self._conn.commit()
 
     def get_history(
         self,
@@ -192,33 +199,35 @@ class MessageDatabase:
             A list of ``dict`` objects, one per row, keyed by column
             name.
         """
-        if month_year is not None:
-            cursor = self._conn.execute(
-                """
-                SELECT *
-                  FROM message_history
-                 WHERE month_year = ?
-                 ORDER BY id DESC
-                """,
-                (month_year,),
-            )
-        else:
-            cursor = self._conn.execute(
-                """
-                SELECT *
-                  FROM message_history
-                 ORDER BY id DESC
-                """
-            )
+        with self._lock:
+            if month_year is not None:
+                cursor = self._conn.execute(
+                    """
+                    SELECT *
+                      FROM message_history
+                     WHERE month_year = ?
+                     ORDER BY id DESC
+                    """,
+                    (month_year,),
+                )
+            else:
+                cursor = self._conn.execute(
+                    """
+                    SELECT *
+                      FROM message_history
+                     ORDER BY id DESC
+                    """
+                )
 
-        return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
 
     def close(self) -> None:
-        """Close the underlying SQLite connection.
-
-        Subsequent calls are safe but have no effect.
-        """
-        self._conn.close()
+        """Close the underlying SQLite connection. Safe to call multiple times."""
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -229,3 +238,17 @@ class MessageDatabase:
         self._conn.execute(self._CREATE_TABLE_SQL)
         self._conn.execute(self._CREATE_INDEX_SQL)
         self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Migrate database schema from older versions.
+
+        Drops the old UNIQUE index (if present) and replaces it with a
+        non-unique index so that multiple audit-trail rows can exist for
+        the same (phone, month_year, template_name) combination.
+        """
+        try:
+            self._conn.execute("DROP INDEX IF EXISTS idx_phone_month_template")
+            self._conn.execute(self._CREATE_INDEX_SQL)
+            self._conn.commit()
+        except Exception:
+            pass  # Index may not exist in a fresh database

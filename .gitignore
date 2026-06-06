@@ -6,7 +6,13 @@ __pycache__/
 dist/
 build/
 
-# Environment
+# Virtual environments
+myenv/
+venv/
+.venv/
+env/
+
+# Environment (contains secrets)
 .env
 
 # IDE
@@ -20,3 +26,7 @@ reports/
 
 # Database (generated at runtime)
 database/
+
+# PyInstaller
+*.manifest
+*.log
