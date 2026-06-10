@@ -11,6 +11,8 @@ myenv/
 venv/
 .venv/
 env/
+build_venv/
+tmp_venv/
 
 # Environment (contains secrets)
 .env
@@ -30,3 +32,7 @@ database/
 # PyInstaller
 *.manifest
 *.log
+
+# OS generated files
+.DS_Store
+Thumbs.db

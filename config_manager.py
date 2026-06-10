@@ -213,6 +213,12 @@ def validate_settings(settings: dict[str, str]) -> tuple[bool, str]:
         value = settings.get(key, "").strip()
         if not value:
             missing.append(label)
+        elif key == "ACCESS_TOKEN" and not value.isascii():
+            return False, (
+                "The Access Token contains invalid hidden or special characters.\n"
+                "Please copy it into a plain text editor (like Notepad), clear any formatting, "
+                "and paste it again."
+            )
 
     if missing:
         return False, "The following fields are required:\n• " + "\n• ".join(missing)
